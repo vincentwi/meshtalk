@@ -419,7 +419,8 @@ async def status():
 @app.websocket("/ws/glasses")
 async def glasses_ws(ws: WebSocket):
     await ws.accept()
-    glass_id = f"glass_{int(time.time()*1000) % 100000}"
+    # Get glass ID from query params or generate one
+    glass_id = ws.query_params.get("id", f"glass_{int(time.time()*1000) % 100000}")
     glasses_connections[glass_id] = ws
     audio_stats["connected_glasses"] = len(glasses_connections)
     print(f"[+] Glasses connected: {glass_id} (total: {len(glasses_connections)})")
@@ -433,7 +434,15 @@ async def glasses_ws(ws: WebSocket):
             audio_stats["chunks_received"] += 1
             audio_stats["last_chunk_time"] = time.time()
 
-            # Relay raw PCM16 to all viewers
+            # Relay to OTHER glasses (not back to sender)
+            for gid, gws in list(glasses_connections.items()):
+                if gid != glass_id:
+                    try:
+                        await gws.send_bytes(data)
+                    except Exception:
+                        pass
+
+            # Also relay to all viewers
             dead: list[WebSocket] = []
             for viewer in viewer_connections:
                 try:

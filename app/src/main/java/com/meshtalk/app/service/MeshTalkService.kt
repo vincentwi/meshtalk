@@ -76,7 +76,9 @@ class MeshTalkService : Service() {
     }
 
     private fun initPipeline() {
-        val deviceId = Build.SERIAL.takeLast(6).ifEmpty { "glass" }
+        // Use ANDROID_ID as unique device identifier (Build.SERIAL is "unknown" on modern Android)
+        val androidId = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+        val deviceId = androidId?.takeLast(6) ?: "glass_${System.currentTimeMillis() % 100000}"
 
         // Audio components
         captureEngine = AudioCaptureEngine()
@@ -142,10 +144,14 @@ class MeshTalkService : Service() {
         }
 
         // Start audio stream client (runs independently of VOX state)
-        audioStreamClient = AudioStreamClient(this, captureEngine.audioFrames).also {
+        audioStreamClient = AudioStreamClient(this, captureEngine.audioFrames, deviceId).also {
+            it.onAudioReceived = { pcmShorts ->
+                val filtered = clickFilter.process(pcmShorts)
+                playbackEngine.play(filtered)
+            }
             it.start()
         }
-        Log.i(TAG, "Audio stream client started (passive relay to server)")
+        Log.i(TAG, "Audio stream client started (bidirectional relay via server)")
 
         isActive = true
         Log.i(TAG, "Pipeline initialized, device=$deviceId")

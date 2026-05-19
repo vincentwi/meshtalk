@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit
 class AudioStreamClient(
     private val context: Context,
     private val audioFrames: SharedFlow<ShortArray>,
+    private val deviceId: String = "unknown",
 ) {
     companion object {
         private const val TAG = "AudioStreamClient"
@@ -49,6 +50,9 @@ class AudioStreamClient(
 
     @Volatile
     private var isConnected = false
+
+    /** Callback invoked when audio is received from another glasses via the server. */
+    var onAudioReceived: ((ShortArray) -> Unit)? = null
 
     var serverIp: String
         get() = prefs.getString(KEY_SERVER_IP, detectDefaultIp()) ?: detectDefaultIp()
@@ -85,7 +89,7 @@ class AudioStreamClient(
             .readTimeout(0, TimeUnit.MINUTES) // indefinite for WebSocket
             .build()
 
-        val url = "ws://${serverIp}:$DEFAULT_PORT/ws/glasses"
+        val url = "ws://${serverIp}:$DEFAULT_PORT/ws/glasses?id=$deviceId"
         val request = Request.Builder().url(url).build()
 
         Log.i(TAG, "Connecting to $url")
@@ -96,6 +100,15 @@ class AudioStreamClient(
                 this@AudioStreamClient.webSocket = webSocket
                 isConnected = true
                 startCollecting()
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                // Received audio from another glasses relayed by the server
+                val byteArray = bytes.toByteArray()
+                if (byteArray.size < 2) return
+                val shorts = ShortArray(byteArray.size / 2)
+                ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts)
+                onAudioReceived?.invoke(shorts)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
