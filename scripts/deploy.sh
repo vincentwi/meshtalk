@@ -1,79 +1,51 @@
-#!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────────────
-# deploy.sh — Build MeshTalk APK and deploy to all connected ARGF20
-#              (RayNeo X3 Pro) glasses via ADB.
-#
-# Usage:  ./scripts/deploy.sh
-# ──────────────────────────────────────────────────────────────────────
-set -euo pipefail
+#!/bin/bash
+set -e
 
-ADB="/opt/homebrew/bin/adb"
-PKG="com.meshtalk.app"
-ACTIVITY="com.meshtalk.app.MeshTalkActivity"
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ADB=/opt/homebrew/bin/adb
+PKG=com.meshtalk.app
+APK=app/build/outputs/apk/debug/app-debug.apk
 
-# ── Colours ───────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Colour
+echo "=== Building MeshTalk ==="
+cd "$(dirname "$0")/.."
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21
+export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
+./gradlew assembleDebug 2>&1 | tail -3
 
-info()  { echo -e "${GREEN}[✓]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-fail()  { echo -e "${RED}[✗]${NC} $*"; exit 1; }
+SERIALS=($($ADB devices -l | grep 'ARGF20' | awk '{print $1}'))
+echo "=== Found ${#SERIALS[@]} glasses ==="
 
-# ── Pre-flight checks ────────────────────────────────────────────────
-command -v "$ADB" >/dev/null 2>&1 || fail "adb not found at $ADB"
-
-# ── Build APK ─────────────────────────────────────────────────────────
-info "Building debug APK …"
-cd "$PROJECT_DIR"
-./gradlew assembleDebug --quiet || fail "Gradle build failed"
-
-APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" -name '*.apk' | head -1)
-[ -f "$APK" ] || fail "APK not found after build"
-info "APK: $APK"
-
-# ── Discover ARGF20 glasses ──────────────────────────────────────────
-# ARGF20 is the RayNeo X3 Pro model identifier.
-# We look for any connected device (the glasses typically report as the
-# only adb device). Filter by model if multiple devices are attached.
-DEVICES=()
-while IFS= read -r serial; do
-    [ -z "$serial" ] && continue
-    model=$("$ADB" -s "$serial" shell getprop ro.product.model 2>/dev/null || echo "unknown")
-    # Accept all devices — but log the model so we know what we hit
-    info "Found device: $serial (model: $model)"
-    DEVICES+=("$serial")
-done < <("$ADB" devices | tail -n +2 | awk '/device$/{print $1}')
-
-[ ${#DEVICES[@]} -eq 0 ] && fail "No ADB devices found. Plug in the glasses and try again."
-
-# ── Deploy to each device ────────────────────────────────────────────
-for serial in "${DEVICES[@]}"; do
+for SERIAL in "${SERIALS[@]}"; do
     echo ""
-    info "━━━ Deploying to $serial ━━━"
-
-    # Install APK (replace existing)
-    info "Installing APK …"
-    "$ADB" -s "$serial" install -r "$APK" || { warn "Install failed on $serial"; continue; }
-
-    # Grant runtime permissions
-    info "Granting permissions …"
-    "$ADB" -s "$serial" shell pm grant "$PKG" android.permission.RECORD_AUDIO         2>/dev/null || true
-    "$ADB" -s "$serial" shell pm grant "$PKG" android.permission.ACCESS_FINE_LOCATION  2>/dev/null || true
-    "$ADB" -s "$serial" shell pm grant "$PKG" android.permission.NEARBY_WIFI_DEVICES   2>/dev/null || true
-
-    # Ensure WiFi is enabled
-    info "Enabling WiFi …"
-    "$ADB" -s "$serial" shell svc wifi enable 2>/dev/null || true
-
-    # Launch the activity
-    info "Launching MeshTalk …"
-    "$ADB" -s "$serial" shell am start -n "$PKG/$ACTIVITY" 2>/dev/null || warn "Launch failed on $serial"
-
-    info "Done with $serial"
+    echo "=== Deploying to $SERIAL ==="
+    $ADB -s $SERIAL shell settings put global mercury_install_allowed 1
+    $ADB -s $SERIAL install -r $APK
+    
+    # Grant permissions
+    $ADB -s $SERIAL shell pm grant $PKG android.permission.RECORD_AUDIO 2>/dev/null || true
+    $ADB -s $SERIAL shell pm grant $PKG android.permission.ACCESS_FINE_LOCATION 2>/dev/null || true
+    $ADB -s $SERIAL shell pm grant $PKG android.permission.ACCESS_COARSE_LOCATION 2>/dev/null || true
+    
+    # Enable WiFi and WiFi Aware (Mercury OS disables aware by default)
+    $ADB -s $SERIAL shell svc wifi enable
+    $ADB -s $SERIAL shell settings put secure aware_enabled 1
+    
+    # Set up ADB reverse tunnel for streaming server
+    $ADB -s $SERIAL reverse tcp:8435 tcp:8435
+    
+    sleep 2
+    $ADB -s $SERIAL shell am start -n $PKG/.MeshTalkActivity
+    echo "    ✓ Deployed and launched on $SERIAL"
 done
 
 echo ""
-info "All devices deployed! 🎙️"
+echo "=== All glasses deployed ==="
+echo "Streaming server: http://localhost:8435"
+echo "WiFi Aware enabled, reverse tunnels active"
+echo ""
+
+# Check server status
+if curl -s http://localhost:8435/api/status >/dev/null 2>&1; then
+    echo "Server status: $(curl -s http://localhost:8435/api/status)"
+else
+    echo "⚠ Streaming server not running. Start with: cd server && ./start.sh"
+fi
