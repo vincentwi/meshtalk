@@ -220,7 +220,7 @@ class MeshTalkService : Service() {
         channelManager.switchChannel()
     }
 
-    private fun stopPipeline() {
+    fun stopPipeline() {
         pipelineJob?.cancel()
         audioStreamClient?.stop()
         audioStreamClient = null

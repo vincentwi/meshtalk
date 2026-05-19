@@ -18,8 +18,8 @@ import android.view.View
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import com.ffalcon.mercury.android.sdk.temple.TempleAction
-import com.ffalcon.mercury.android.sdk.view.BaseMirrorActivity
+import com.ffalcon.mercury.android.sdk.touch.TempleAction
+import com.ffalcon.mercury.android.sdk.ui.activity.BaseMirrorActivity
 import com.meshtalk.app.databinding.ActivityMeshtalkBinding
 import com.meshtalk.app.hud.HudRenderer
 import com.meshtalk.app.service.MeshTalkService

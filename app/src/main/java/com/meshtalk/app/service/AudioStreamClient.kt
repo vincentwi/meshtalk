@@ -69,7 +69,7 @@ class AudioStreamClient(
         collectJob?.cancel()
         webSocket?.close(1000, "Client stopping")
         webSocket = null
-        client?.dispatcher.executorService.shutdown()
+        client?.dispatcher?.executorService?.shutdown()
         client = null
         isConnected = false
         Log.i(TAG, "Audio stream client stopped")

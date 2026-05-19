@@ -75,7 +75,7 @@ class WifiAwareTransport(
             override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
                 val peerId = String(message, Charsets.UTF_8)
                 Log.i(TAG, "Message from peer: $peerId, requesting network")
-                requestNetwork(session, peerHandle, peerId)
+                publishSession?.let { requestNetwork(it, peerHandle, peerId) }
             }
         }, handler)
     }
@@ -122,17 +122,10 @@ class WifiAwareTransport(
         connectivityManager.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 val peerInfo = caps.transportInfo as? WifiAwareNetworkInfo ?: return
-                val peerAddr = peerInfo.peerIpv6Addr
-                val scopeId = peerInfo.networkInterface?.let {
-                    NetworkInterface.getByName(it)?.index ?: 0
-                } ?: 0
-
-                val addr = Inet6Address.getByAddress(
-                    null, peerAddr.address, scopeId
-                )
-                val peer = MeshPeer(peerId, addr, udpPort)
+                val peerAddr = peerInfo.peerIpv6Addr ?: return
+                val peer = MeshPeer(peerId, peerAddr, udpPort)
                 connectedPeers[peerId] = peer
-                Log.i(TAG, "Connected to peer $peerId at $addr")
+                Log.i(TAG, "Connected to peer $peerId at $peerAddr")
                 onPeerDiscovered?.invoke(peer)
             }
 

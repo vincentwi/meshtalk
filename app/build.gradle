@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace 'com.meshtalk.app'
-    compileSdk 36
+    compileSdk 35
 
     defaultConfig {
         applicationId "com.meshtalk.app"
         minSdk 26
-        targetSdk 36
+        targetSdk 35
         versionCode 1
         versionName "0.1.0"
 
@@ -53,12 +53,20 @@ android {
     }
 }
 
+configurations.all {
+    resolutionStrategy {
+        force "org.jetbrains.kotlin:kotlin-stdlib:2.2.0"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.2.0"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.2.0"
+    }
+}
+
 dependencies {
     // Mercury SDK (local AAR)
     implementation fileTree(dir: 'libs', include: ['*.aar'])
 
     // Kotlin stdlib (pin to match plugin version to avoid metadata mismatch)
-    implementation "org.jetbrains.kotlin:kotlin-stdlib:2.0.21"
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:2.2.0"
 
     // VAD (Voice Activity Detection)
     implementation 'com.github.gkonovalov.android-vad:silero:2.0.10'
