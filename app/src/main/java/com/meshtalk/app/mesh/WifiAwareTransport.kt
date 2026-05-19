@@ -61,50 +61,61 @@ class WifiAwareTransport(
     }
 
     private fun publish(channelName: String) {
-        val config = PublishConfig.Builder()
-            .setServiceName(channelName)
-            .setServiceSpecificInfo(deviceId.toByteArray(Charsets.UTF_8))
-            .setPublishType(PublishConfig.PUBLISH_TYPE_UNSOLICITED)
-            .build()
+        try {
+            val config = PublishConfig.Builder()
+                .setServiceName(channelName)
+                .setServiceSpecificInfo(deviceId.toByteArray(Charsets.UTF_8))
+                .setPublishType(PublishConfig.PUBLISH_TYPE_UNSOLICITED)
+                .build()
 
-        awareSession?.publish(config, object : DiscoverySessionCallback() {
-            override fun onPublishStarted(session: PublishDiscoverySession) {
-                publishSession = session
-                Log.i(TAG, "Publishing on $channelName")
-            }
-            override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
-                val peerId = String(message, Charsets.UTF_8)
-                Log.i(TAG, "Message from peer: $peerId, requesting network")
-                publishSession?.let { requestNetwork(it, peerHandle, peerId) }
-            }
-        }, handler)
+            awareSession?.publish(config, object : DiscoverySessionCallback() {
+                override fun onPublishStarted(session: PublishDiscoverySession) {
+                    publishSession = session
+                    Log.i(TAG, "Publishing on $channelName")
+                }
+                override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
+                    val peerId = String(message, Charsets.UTF_8)
+                    Log.i(TAG, "Message from peer: $peerId, requesting network")
+                    publishSession?.let { requestNetwork(it, peerHandle, peerId) }
+                }
+            }, handler)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Location permission required for WiFi Aware publish: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Publish failed: ${e.message}")
+        }
     }
 
     private fun subscribe(channelName: String) {
-        val config = SubscribeConfig.Builder()
-            .setServiceName(channelName)
-            .setSubscribeType(SubscribeConfig.SUBSCRIBE_TYPE_PASSIVE)
-            .build()
+        try {
+            val config = SubscribeConfig.Builder()
+                .setServiceName(channelName)
+                .setSubscribeType(SubscribeConfig.SUBSCRIBE_TYPE_PASSIVE)
+                .build()
 
-        awareSession?.subscribe(config, object : DiscoverySessionCallback() {
-            override fun onServiceDiscovered(
-                peerHandle: PeerHandle,
-                serviceSpecificInfo: ByteArray,
-                matchFilter: List<ByteArray>
-            ) {
-                val peerId = String(serviceSpecificInfo, Charsets.UTF_8)
-                if (peerId == deviceId) return // Ignore self
-                Log.i(TAG, "Discovered peer: $peerId")
-                // Send our ID so the publisher can identify us
-                subscribeSession?.sendMessage(peerHandle, 0, deviceId.toByteArray(Charsets.UTF_8))
-                requestNetwork(subscribeSession!!, peerHandle, peerId)
-            }
+            awareSession?.subscribe(config, object : DiscoverySessionCallback() {
+                override fun onServiceDiscovered(
+                    peerHandle: PeerHandle,
+                    serviceSpecificInfo: ByteArray,
+                    matchFilter: List<ByteArray>
+                ) {
+                    val peerId = String(serviceSpecificInfo, Charsets.UTF_8)
+                    if (peerId == deviceId) return
+                    Log.i(TAG, "Discovered peer: $peerId")
+                    subscribeSession?.sendMessage(peerHandle, 0, deviceId.toByteArray(Charsets.UTF_8))
+                    subscribeSession?.let { requestNetwork(it, peerHandle, peerId) }
+                }
 
-            override fun onSubscribeStarted(session: SubscribeDiscoverySession) {
-                subscribeSession = session
-                Log.i(TAG, "Subscribed to $channelName")
-            }
-        }, handler)
+                override fun onSubscribeStarted(session: SubscribeDiscoverySession) {
+                    subscribeSession = session
+                    Log.i(TAG, "Subscribed to $channelName")
+                }
+            }, handler)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Location permission required for WiFi Aware subscribe: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Subscribe failed: ${e.message}")
+        }
     }
 
     private fun requestNetwork(session: DiscoverySession, peerHandle: PeerHandle, peerId: String) {
