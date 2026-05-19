@@ -174,6 +174,12 @@ class MeshTalkActivity : BaseMirrorActivity<ActivityMeshtalkBinding>() {
                 hudRenderer.updateChannel(channelName)
             }
         }
+
+        svc.onPeerDirectionChanged = { angle, distance ->
+            runOnUiThread {
+                hudRenderer.updatePeerDirection(angle, distance)
+            }
+        }
     }
 
     // ── Exit ──────────────────────────────────────────────────────────────

@@ -114,6 +114,28 @@ html, body {
   color: #888888;
   white-space: nowrap;
 }
+
+/* ── Bottom-left: Spatial radar ── */
+#radar-block {
+  position: absolute;
+  bottom: 36px; left: 16px;
+  width: 80px; height: 80px;
+  display: none;  /* shown when peer direction is known */
+}
+#radar-canvas {
+  width: 80px;
+  height: 80px;
+}
+#radar-label {
+  position: absolute;
+  bottom: -16px;
+  left: 0;
+  width: 80px;
+  text-align: center;
+  font-size: 10px;
+  color: #88ccff;
+  letter-spacing: 1px;
+}
 </style>
 </head>
 <body>
@@ -137,6 +159,12 @@ html, body {
 
 <div id="status-bar">ready</div>
 
+<!-- Spatial radar -->
+<div id="radar-block">
+  <canvas id="radar-canvas" width="160" height="160"></canvas>
+  <div id="radar-label">—</div>
+</div>
+
 <script>
 (function() {
   'use strict';
@@ -147,6 +175,92 @@ html, body {
   var elVoxLabel  = document.getElementById('vox-label');
   var elMute      = document.getElementById('mute-indicator');
   var elStatus    = document.getElementById('status-bar');
+  var elRadar     = document.getElementById('radar-block');
+  var radarCanvas = document.getElementById('radar-canvas');
+  var radarCtx    = radarCanvas.getContext('2d');
+  var elRadarLabel = document.getElementById('radar-label');
+
+  // Radar state
+  var peerAngle = 0;    // degrees, 0 = ahead
+  var peerDist = 0.5;   // 0.0 = touching, 1.0 = far
+  var radarVisible = false;
+
+  function drawRadar() {
+    var w = radarCanvas.width;
+    var h = radarCanvas.height;
+    var cx = w / 2;
+    var cy = h / 2;
+    var r = w / 2 - 4;
+
+    radarCtx.clearRect(0, 0, w, h);
+
+    // Outer ring
+    radarCtx.beginPath();
+    radarCtx.arc(cx, cy, r, 0, Math.PI * 2);
+    radarCtx.strokeStyle = 'rgba(0, 255, 255, 0.25)';
+    radarCtx.lineWidth = 1.5;
+    radarCtx.stroke();
+
+    // Middle ring
+    radarCtx.beginPath();
+    radarCtx.arc(cx, cy, r * 0.5, 0, Math.PI * 2);
+    radarCtx.strokeStyle = 'rgba(0, 255, 255, 0.12)';
+    radarCtx.lineWidth = 1;
+    radarCtx.stroke();
+
+    // Crosshair
+    radarCtx.beginPath();
+    radarCtx.moveTo(cx, cy - r); radarCtx.lineTo(cx, cy + r);
+    radarCtx.moveTo(cx - r, cy); radarCtx.lineTo(cx + r, cy);
+    radarCtx.strokeStyle = 'rgba(0, 255, 255, 0.08)';
+    radarCtx.lineWidth = 1;
+    radarCtx.stroke();
+
+    // "Forward" indicator (small triangle at top)
+    radarCtx.beginPath();
+    radarCtx.moveTo(cx, cy - r - 2);
+    radarCtx.lineTo(cx - 4, cy - r + 5);
+    radarCtx.lineTo(cx + 4, cy - r + 5);
+    radarCtx.closePath();
+    radarCtx.fillStyle = 'rgba(0, 255, 255, 0.5)';
+    radarCtx.fill();
+
+    // Center dot (listener)
+    radarCtx.beginPath();
+    radarCtx.arc(cx, cy, 3, 0, Math.PI * 2);
+    radarCtx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    radarCtx.fill();
+
+    // Peer dot
+    // angle: 0 = ahead (top), positive = clockwise
+    // distance maps to radius: 0 = center, 1 = edge
+    var angleRad = (peerAngle - 90) * Math.PI / 180;  // -90 to make 0° = up
+    var dotR = peerDist * r * 0.85;
+    var dx = cx + Math.cos(angleRad) * dotR;
+    var dy = cy + Math.sin(angleRad) * dotR;
+
+    // Dot color: green when near, yellow mid, red far
+    var dotColor;
+    if (peerDist < 0.33) dotColor = '#30d158';       // near = green
+    else if (peerDist < 0.66) dotColor = '#ffd60a';   // mid = yellow
+    else dotColor = '#ff6b6b';                         // far = red
+
+    // Glow
+    radarCtx.beginPath();
+    radarCtx.arc(dx, dy, 8, 0, Math.PI * 2);
+    radarCtx.fillStyle = dotColor.replace(')', ', 0.25)').replace('rgb', 'rgba').replace('#', '');
+    // Simple glow via shadow
+    radarCtx.shadowColor = dotColor;
+    radarCtx.shadowBlur = 8;
+    radarCtx.fill();
+    radarCtx.shadowBlur = 0;
+
+    // Solid dot
+    radarCtx.beginPath();
+    radarCtx.arc(dx, dy, 5, 0, Math.PI * 2);
+    radarCtx.fillStyle = dotColor;
+    radarCtx.fill();
+  }
 
   window.HUD = {
     updateChannel: function(name) {
@@ -176,6 +290,30 @@ html, body {
 
     updateStatus: function(text) {
       elStatus.textContent = text || '';
+    },
+
+    /**
+     * Update peer spatial radar.
+     * @param {number} angle  - relative direction in degrees (0=ahead, ±180=behind)
+     * @param {number} distance - normalized distance (0.0=touching, 1.0=far)
+     */
+    updatePeerDirection: function(angle, distance) {
+      peerAngle = angle || 0;
+      peerDist = Math.max(0, Math.min(1, distance || 0.5));
+
+      if (!radarVisible) {
+        radarVisible = true;
+        elRadar.style.display = 'block';
+      }
+
+      drawRadar();
+
+      // Update distance label
+      var label;
+      if (peerDist < 0.33) label = 'NEAR';
+      else if (peerDist < 0.66) label = 'MID';
+      else label = 'FAR';
+      elRadarLabel.textContent = label;
     }
   };
 

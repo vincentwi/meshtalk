@@ -87,6 +87,15 @@ class HudRenderer(private val webView: WebView) {
         runJs("HUD.updateStatus('${escapeJs(text)}')")
     }
 
+    /**
+     * Update the spatial radar display with peer direction and distance.
+     * @param angle  relative direction in degrees (0 = directly ahead, ±180 = behind)
+     * @param distance  normalized distance (0.0 = touching, 1.0 = far)
+     */
+    fun updatePeerDirection(angle: Float, distance: Float) {
+        runJs("HUD.updatePeerDirection($angle, $distance)")
+    }
+
     // ── Internal helpers ────────────────────────────────────────────────
 
     /**

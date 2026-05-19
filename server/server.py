@@ -13,6 +13,9 @@ glasses_connections: dict[str, WebSocket] = {}
 viewer_connections: set[WebSocket] = set()
 audio_stats = {"chunks_received": 0, "last_chunk_time": 0.0, "connected_glasses": 0}
 
+# Per-glasses spatial metadata (last known orientation + RSSI)
+glasses_spatial: dict[str, dict] = {}
+
 VIEWER_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -217,7 +220,7 @@ VIEWER_HTML = r"""<!DOCTYPE html>
     <input type="range" id="volumeSlider" min="0" max="100" value="80">
   </div>
 
-  <div class="footer">PCM16 · 16kHz · Mono · WebSocket</div>
+  <div class="footer">PCM16 · 16kHz · Mono · WebSocket · Spatial</div>
 </div>
 
 <script>
@@ -413,6 +416,7 @@ async def status():
         "viewers_connected": len(viewer_connections),
         "audio_chunks": audio_stats["chunks_received"],
         "last_audio": audio_stats["last_chunk_time"],
+        "spatial": glasses_spatial,
     }
 
 
@@ -430,27 +434,76 @@ async def glasses_ws(ws: WebSocket):
 
     try:
         while True:
-            data = await ws.receive_bytes()
-            audio_stats["chunks_received"] += 1
-            audio_stats["last_chunk_time"] = time.time()
+            # WebSocket can receive either binary (audio) or text (control/spatial)
+            message = await ws.receive()
 
-            # Relay to OTHER glasses (not back to sender)
-            for gid, gws in list(glasses_connections.items()):
-                if gid != glass_id:
+            if "bytes" in message and message["bytes"] is not None:
+                # Binary = audio data
+                data = message["bytes"]
+                audio_stats["chunks_received"] += 1
+                audio_stats["last_chunk_time"] = time.time()
+
+                # Relay to OTHER glasses (not back to sender)
+                for gid, gws in list(glasses_connections.items()):
+                    if gid != glass_id:
+                        try:
+                            await gws.send_bytes(data)
+                        except Exception:
+                            pass
+
+                # Also relay to all viewers
+                dead: list[WebSocket] = []
+                for viewer in viewer_connections:
                     try:
-                        await gws.send_bytes(data)
+                        await viewer.send_bytes(data)
                     except Exception:
-                        pass
+                        dead.append(viewer)
+                for d in dead:
+                    viewer_connections.discard(d)
 
-            # Also relay to all viewers
-            dead: list[WebSocket] = []
-            for viewer in viewer_connections:
+            elif "text" in message and message["text"] is not None:
+                # Text = control/spatial message (JSON)
+                text = message["text"]
                 try:
-                    await viewer.send_bytes(data)
-                except Exception:
-                    dead.append(viewer)
-            for d in dead:
-                viewer_connections.discard(d)
+                    msg = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_type = msg.get("type", "")
+
+                if msg_type == "spatial":
+                    # Store spatial metadata for this glasses
+                    glasses_spatial[glass_id] = {
+                        "yaw": msg.get("yaw", 0),
+                        "pitch": msg.get("pitch", 0),
+                        "roll": msg.get("roll", 0),
+                        "ts": time.time(),
+                    }
+
+                    # Relay spatial info to OTHER glasses with sender ID
+                    relay_msg = json.dumps({
+                        "type": "spatial",
+                        "from": glass_id,
+                        "yaw": msg.get("yaw", 0),
+                        "pitch": msg.get("pitch", 0),
+                        "roll": msg.get("roll", 0),
+                    })
+                    for gid, gws in list(glasses_connections.items()):
+                        if gid != glass_id:
+                            try:
+                                await gws.send_text(relay_msg)
+                            except Exception:
+                                pass
+
+                elif msg_type == "control":
+                    # Generic control: relay to all other glasses
+                    relay_msg = json.dumps({**msg, "from": glass_id})
+                    for gid, gws in list(glasses_connections.items()):
+                        if gid != glass_id:
+                            try:
+                                await gws.send_text(relay_msg)
+                            except Exception:
+                                pass
 
     except WebSocketDisconnect:
         pass
@@ -458,6 +511,7 @@ async def glasses_ws(ws: WebSocket):
         print(f"[!] Glasses error: {e}")
     finally:
         glasses_connections.pop(glass_id, None)
+        glasses_spatial.pop(glass_id, None)
         audio_stats["connected_glasses"] = len(glasses_connections)
         print(f"[-] Glasses disconnected: {glass_id} (remaining: {len(glasses_connections)})")
 

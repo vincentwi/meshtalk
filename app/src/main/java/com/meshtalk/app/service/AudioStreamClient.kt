@@ -19,6 +19,9 @@ import java.util.concurrent.TimeUnit
  * Connects to ws://SERVER_IP:8435/ws/glasses and sends every audio frame as a binary
  * WebSocket message (little-endian PCM16, 16kHz mono).
  *
+ * Also sends/receives JSON text messages for spatial data (head orientation, RSSI)
+ * and other control messages.
+ *
  * Runs independently of the walkie-talkie VOX pipeline — even if walkie-talkie is
  * toggled off, the stream continues as long as AudioCaptureEngine is capturing.
  */
@@ -54,6 +57,9 @@ class AudioStreamClient(
     /** Callback invoked when audio is received from another glasses via the server. */
     var onAudioReceived: ((ShortArray) -> Unit)? = null
 
+    /** Callback invoked when a spatial/control text message is received from the server. */
+    var onTextMessageReceived: ((String) -> Unit)? = null
+
     var serverIp: String
         get() = prefs.getString(KEY_SERVER_IP, detectDefaultIp()) ?: detectDefaultIp()
         set(value) = prefs.edit().putString(KEY_SERVER_IP, value).apply()
@@ -77,6 +83,16 @@ class AudioStreamClient(
         client = null
         isConnected = false
         Log.i(TAG, "Audio stream client stopped")
+    }
+
+    /** Send a text (JSON) message over the WebSocket. Used for spatial/control data. */
+    fun sendText(text: String) {
+        if (!isConnected || webSocket == null) return
+        try {
+            webSocket?.send(text)
+        } catch (e: Exception) {
+            Log.w(TAG, "sendText failed: ${e.message}")
+        }
     }
 
     private fun connect() {
@@ -109,6 +125,11 @@ class AudioStreamClient(
                 val shorts = ShortArray(byteArray.size / 2)
                 ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts)
                 onAudioReceived?.invoke(shorts)
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                // Received text (JSON) control/spatial message from server
+                onTextMessageReceived?.invoke(text)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
