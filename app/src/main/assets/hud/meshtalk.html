@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=640,height=480,initial-scale=1.0,user-scalable=no">
+<title>MeshTalk HUD</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 640px; height: 480px;
+  overflow: hidden;
+  background: transparent;
+  font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+  color: #ffffff;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Top-left: app name ── */
+#app-name {
+  position: absolute;
+  top: 12px; left: 16px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: #00ffff;
+  text-shadow:
+    0 0 6px rgba(0, 255, 255, 0.9),
+    0 0 14px rgba(0, 255, 255, 0.6),
+    0 0 28px rgba(0, 255, 255, 0.3);
+}
+
+/* ── Top-right: channel + user count ── */
+#channel-block {
+  position: absolute;
+  top: 12px; right: 16px;
+  text-align: right;
+}
+#channel-name {
+  font-size: 22px;
+  font-weight: 600;
+  color: #00ffff;
+}
+#user-count {
+  font-size: 16px;
+  color: #88ccff;
+  margin-top: 2px;
+}
+
+/* ── Center: VOX indicator ── */
+#vox-block {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+#vox-dot {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background: #666666;
+  transition: background 0.2s ease;
+}
+#vox-dot.active {
+  background: #00ee44;
+  animation: pulse 1s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(0, 238, 68, 0.7); }
+  50%  { box-shadow: 0 0 16px 8px rgba(0, 238, 68, 0.35); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 238, 68, 0); }
+}
+#vox-label {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: #cccccc;
+}
+#vox-label.active {
+  color: #00ee44;
+}
+
+/* ── Below center: mute indicator ── */
+#mute-indicator {
+  position: absolute;
+  top: 58%; left: 50%;
+  transform: translateX(-50%);
+  margin-top: 20px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #ff3333;
+  display: none;
+}
+
+/* ── Bottom corners: swipe hints ── */
+.swipe-hint {
+  position: absolute;
+  bottom: 14px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.15);
+  font-weight: 400;
+}
+#hint-left  { left: 16px; }
+#hint-right { right: 16px; }
+
+/* ── Bottom center: status bar ── */
+#status-bar {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 14px;
+  color: #888888;
+  white-space: nowrap;
+}
+</style>
+</head>
+<body>
+
+<div id="app-name">MESHTALK</div>
+
+<div id="channel-block">
+  <div id="channel-name">DEFAULT</div>
+  <div id="user-count">0 on</div>
+</div>
+
+<div id="vox-block">
+  <div id="vox-dot"></div>
+  <div id="vox-label">IDLE</div>
+</div>
+
+<div id="mute-indicator">🔇 MUTED</div>
+
+<div class="swipe-hint" id="hint-left">← CH</div>
+<div class="swipe-hint" id="hint-right">MUTE →</div>
+
+<div id="status-bar">ready</div>
+
+<script>
+(function() {
+  'use strict';
+
+  var elChannel   = document.getElementById('channel-name');
+  var elUserCount = document.getElementById('user-count');
+  var elVoxDot    = document.getElementById('vox-dot');
+  var elVoxLabel  = document.getElementById('vox-label');
+  var elMute      = document.getElementById('mute-indicator');
+  var elStatus    = document.getElementById('status-bar');
+
+  window.HUD = {
+    updateChannel: function(name) {
+      elChannel.textContent = name || 'DEFAULT';
+    },
+
+    updateUserCount: function(count) {
+      var n = (typeof count === 'number') ? count : parseInt(count, 10) || 0;
+      elUserCount.textContent = n + ' on';
+    },
+
+    updateVox: function(active) {
+      if (active) {
+        elVoxDot.classList.add('active');
+        elVoxLabel.classList.add('active');
+        elVoxLabel.textContent = 'LIVE';
+      } else {
+        elVoxDot.classList.remove('active');
+        elVoxLabel.classList.remove('active');
+        elVoxLabel.textContent = 'IDLE';
+      }
+    },
+
+    updateMute: function(muted) {
+      elMute.style.display = muted ? 'block' : 'none';
+    },
+
+    updateStatus: function(text) {
+      elStatus.textContent = text || '';
+    }
+  };
+
+  document.addEventListener('DOMContentLoaded', function() {
+    if (window.NativeBridge && typeof window.NativeBridge.onWebViewReady === 'function') {
+      window.NativeBridge.onWebViewReady();
+    }
+  });
+})();
+</script>
+</body>
+</html>
