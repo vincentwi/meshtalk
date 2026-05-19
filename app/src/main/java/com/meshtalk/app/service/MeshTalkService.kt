@@ -32,6 +32,9 @@ class MeshTalkService : Service() {
     lateinit var clickFilter: ClickRemovalFilter
     lateinit var audioMixer: AudioMixer
 
+    // Audio streaming to server
+    private var audioStreamClient: AudioStreamClient? = null
+
     // Mesh
     lateinit var transport: MeshTransport
     lateinit var peerManager: PeerManager
@@ -138,6 +141,12 @@ class MeshTalkService : Service() {
             }
         }
 
+        // Start audio stream client (runs independently of VOX state)
+        audioStreamClient = AudioStreamClient(this, captureEngine.audioFrames).also {
+            it.start()
+        }
+        Log.i(TAG, "Audio stream client started (passive relay to server)")
+
         isActive = true
         Log.i(TAG, "Pipeline initialized, device=$deviceId")
     }
@@ -213,6 +222,8 @@ class MeshTalkService : Service() {
 
     private fun stopPipeline() {
         pipelineJob?.cancel()
+        audioStreamClient?.stop()
+        audioStreamClient = null
         captureEngine.stop()
         playbackEngine.stop()
         channelManager.leaveChannel()
