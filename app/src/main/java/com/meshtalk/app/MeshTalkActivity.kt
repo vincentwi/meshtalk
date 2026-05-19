@@ -180,6 +180,12 @@ class MeshTalkActivity : BaseMirrorActivity<ActivityMeshtalkBinding>() {
                 hudRenderer.updatePeerDirection(angle, distance)
             }
         }
+
+        svc.onRadioStateChanged = { state ->
+            runOnUiThread {
+                hudRenderer.updateRadioState(state)
+            }
+        }
     }
 
     // ── Exit ──────────────────────────────────────────────────────────────

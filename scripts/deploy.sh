@@ -24,6 +24,10 @@ for SERIAL in "${SERIALS[@]}"; do
     $ADB -s $SERIAL shell pm grant $PKG android.permission.RECORD_AUDIO 2>/dev/null || true
     $ADB -s $SERIAL shell pm grant $PKG android.permission.ACCESS_FINE_LOCATION 2>/dev/null || true
     $ADB -s $SERIAL shell pm grant $PKG android.permission.ACCESS_COARSE_LOCATION 2>/dev/null || true
+    $ADB -s $SERIAL shell pm grant $PKG android.permission.WRITE_SECURE_SETTINGS 2>/dev/null || true
+    
+    # Battery optimization whitelist (prevents doze from killing service)
+    $ADB -s $SERIAL shell dumpsys deviceidle whitelist +$PKG 2>/dev/null || true
     
     # Enable WiFi and WiFi Aware (Mercury OS disables aware by default)
     $ADB -s $SERIAL shell svc wifi enable

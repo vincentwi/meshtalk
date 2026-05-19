@@ -29,7 +29,7 @@ html, body {
     0 0 28px rgba(0, 255, 255, 0.3);
 }
 
-/* ── Top-right: channel + user count ── */
+/* ── Top-right: channel + user count + radio state ── */
 #channel-block {
   position: absolute;
   top: 12px; right: 16px;
@@ -44,6 +44,32 @@ html, body {
   font-size: 16px;
   color: #88ccff;
   margin-top: 2px;
+}
+#radio-state {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #888888;
+  letter-spacing: 1px;
+}
+#radio-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: #666666;
+  flex-shrink: 0;
+}
+#radio-dot.green  { background: #30d158; box-shadow: 0 0 6px rgba(48, 209, 88, 0.6); }
+#radio-dot.yellow { background: #ffd60a; box-shadow: 0 0 6px rgba(255, 214, 10, 0.6); }
+#radio-dot.orange { background: #ff9f0a; box-shadow: 0 0 6px rgba(255, 159, 10, 0.6); }
+#radio-dot.red    { background: #ff453a; box-shadow: 0 0 6px rgba(255, 69, 58, 0.6); }
+#radio-dot.blue   { background: #64d2ff; box-shadow: 0 0 6px rgba(100, 210, 255, 0.6); }
+#radio-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: inherit;
 }
 
 /* ── Center: VOX indicator ── */
@@ -145,6 +171,10 @@ html, body {
 <div id="channel-block">
   <div id="channel-name">DEFAULT</div>
   <div id="user-count">0 on</div>
+  <div id="radio-state">
+    <span id="radio-label">DISABLED</span>
+    <span id="radio-dot"></span>
+  </div>
 </div>
 
 <div id="vox-block">
@@ -179,6 +209,8 @@ html, body {
   var radarCanvas = document.getElementById('radar-canvas');
   var radarCtx    = radarCanvas.getContext('2d');
   var elRadarLabel = document.getElementById('radar-label');
+  var elRadioDot   = document.getElementById('radio-dot');
+  var elRadioLabel = document.getElementById('radio-label');
 
   // Radar state
   var peerAngle = 0;    // degrees, 0 = ahead
@@ -314,6 +346,38 @@ html, body {
       else if (peerDist < 0.66) label = 'MID';
       else label = 'FAR';
       elRadarLabel.textContent = label;
+    },
+
+    /**
+     * Update radio state indicator.
+     * States: DISABLED, WIFI_OFF, AWARE_DISABLED, ATTACHING, ATTACHED,
+     *         PUBLISHING, DISCOVERING, CONNECTED, DOZING, RECOVERING, FAILED
+     */
+    updateRadioState: function(state) {
+      var s = (state || 'DISABLED').toUpperCase();
+      elRadioLabel.textContent = s;
+
+      // Remove all color classes
+      elRadioDot.className = '';
+      elRadioDot.id = 'radio-dot';
+
+      // Map state → dot color
+      var colorClass;
+      switch (s) {
+        case 'CONNECTED':
+          colorClass = 'green'; break;
+        case 'ATTACHING': case 'ATTACHED':
+        case 'PUBLISHING': case 'DISCOVERING':
+          colorClass = 'yellow'; break;
+        case 'RECOVERING':
+          colorClass = 'orange'; break;
+        case 'DOZING':
+          colorClass = 'blue'; break;
+        case 'FAILED': case 'WIFI_OFF': case 'AWARE_DISABLED': case 'DISABLED':
+        default:
+          colorClass = 'red'; break;
+      }
+      elRadioDot.classList.add(colorClass);
     }
   };
 

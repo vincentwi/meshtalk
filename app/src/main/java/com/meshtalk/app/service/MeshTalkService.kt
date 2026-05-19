@@ -12,6 +12,7 @@ import com.meshtalk.app.audio.*
 import com.meshtalk.app.mesh.*
 import com.meshtalk.app.vox.VoxStateMachine
 import com.meshtalk.app.vox.VoxState
+import com.meshtalk.app.mesh.NanSupervisor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import org.json.JSONObject
@@ -44,6 +45,7 @@ class MeshTalkService : Service() {
 
     // Mesh
     lateinit var transport: MeshTransport
+    lateinit var nanSupervisor: NanSupervisor
     lateinit var peerManager: PeerManager
     lateinit var channelManager: ChannelManager
 
@@ -61,6 +63,7 @@ class MeshTalkService : Service() {
     var onPeerCountChanged: ((Int) -> Unit)? = null
     var onChannelChanged: ((String) -> Unit)? = null
     var onPeerDirectionChanged: ((Float, Float) -> Unit)? = null  // angle, distance
+    var onRadioStateChanged: ((String) -> Unit)? = null
 
     private val binder = LocalBinder()
     inner class LocalBinder : Binder() {
@@ -103,11 +106,20 @@ class MeshTalkService : Service() {
         headTracker = HeadTracker(this)
         spatialEngine = SpatialAudioEngine()
 
-        // Mesh components
-        transport = WifiAwareTransport(this, deviceId)
+        // Mesh components — NanSupervisor wraps WifiAwareTransport for self-healing
+        val wifiTransport = WifiAwareTransport(this, deviceId)
+        transport = wifiTransport
+        nanSupervisor = NanSupervisor(this, wifiTransport)
         peerManager = PeerManager(transport)
         peerManager.deviceId = deviceId
         channelManager = ChannelManager(transport, peerManager)
+
+        // Wire radio state changes to HUD
+        nanSupervisor.onStateChanged = { state ->
+            val stateName = state.name
+            Log.i(TAG, "Radio state: $stateName")
+            onRadioStateChanged?.invoke(stateName)
+        }
 
         // Init native libs
         opusCodec.init()
@@ -149,7 +161,10 @@ class MeshTalkService : Service() {
         playbackEngine.start()
         headTracker.start()
         peerManager.start(scope)
-        channelManager.joinChannel(0) // Default: Alpha
+
+        // Use NanSupervisor to start transport — handles auto-enable, attach, reconnect
+        channelManager.joinChannel(0) // sets currentChannel
+        nanSupervisor.start(channelManager.currentChannel.serviceName)
 
         // Start capture pipeline
         pipelineJob = scope.launch {
@@ -328,6 +343,8 @@ class MeshTalkService : Service() {
     fun switchChannel() {
         audioMixer.clear()
         channelManager.switchChannel()
+        // Restart supervisor with the new channel name
+        nanSupervisor.switchChannel(channelManager.currentChannel.serviceName)
     }
 
     fun stopPipeline() {
@@ -338,6 +355,7 @@ class MeshTalkService : Service() {
         captureEngine.stop()
         playbackEngine.stop()
         headTracker.stop()
+        nanSupervisor.stop()  // Stop supervisor (cleans up transport, receivers, watchdog)
         channelManager.leaveChannel()
         peerManager.stop()
         opusCodec.release()

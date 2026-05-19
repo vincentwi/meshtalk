@@ -29,7 +29,9 @@ class ChannelManager(
         val channel = CHANNELS.getOrNull(channelId) ?: return
         currentChannel = channel
         peerManager.currentChannelId = channelId
-        transport.start(channel.serviceName)
+        // NOTE: transport.start() is NOT called here — NanSupervisor manages the
+        // transport lifecycle (auto-enable aware, attach, reconnect on failure/doze).
+        // The caller must invoke nanSupervisor.start(channel.serviceName) after this.
         peerManager.sendAnnounce()
         onChannelChanged?.invoke(channel)
         Log.i(TAG, "Joined channel: ${channel.displayName}")
@@ -41,7 +43,8 @@ class ChannelManager(
         Log.i(TAG, "Switching: ${currentChannel.displayName} → ${nextChannel.displayName}")
         currentChannel = nextChannel
         peerManager.currentChannelId = nextId
-        transport.switchChannel(nextChannel.serviceName)
+        // NOTE: transport.switchChannel() is NOT called here — NanSupervisor manages it.
+        // The caller must invoke nanSupervisor.switchChannel(nextChannel.serviceName) after this.
         peerManager.sendAnnounce()
         onChannelChanged?.invoke(nextChannel)
     }

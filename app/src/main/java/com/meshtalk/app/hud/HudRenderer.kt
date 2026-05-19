@@ -96,6 +96,15 @@ class HudRenderer(private val webView: WebView) {
         runJs("HUD.updatePeerDirection($angle, $distance)")
     }
 
+    /**
+     * Update the radio state indicator on the HUD.
+     * States: DISABLED, WIFI_OFF, AWARE_DISABLED, ATTACHING, ATTACHED,
+     *         PUBLISHING, DISCOVERING, CONNECTED, DOZING, RECOVERING, FAILED
+     */
+    fun updateRadioState(state: String) {
+        runJs("HUD.updateRadioState('${escapeJs(state)}')")
+    }
+
     // ── Internal helpers ────────────────────────────────────────────────
 
     /**

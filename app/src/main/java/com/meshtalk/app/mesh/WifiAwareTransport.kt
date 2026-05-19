@@ -21,6 +21,9 @@ class WifiAwareTransport(
         private const val PSK = "meshtalk_shared_key_2025"
     }
 
+    /** NanSupervisor hooks into this to receive lifecycle callbacks. */
+    var supervisor: NanSupervisor? = null
+
     private var awareSession: WifiAwareSession? = null
     private var publishSession: PublishDiscoverySession? = null
     private var subscribeSession: SubscribeDiscoverySession? = null
@@ -30,7 +33,7 @@ class WifiAwareTransport(
     private val handlerThread = HandlerThread("WifiAware").also { it.start() }
     private val handler = Handler(handlerThread.looper)
     private val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var currentChannel = ""
 
     override val peers: List<MeshPeer> get() = connectedPeers.values.toList()
@@ -42,7 +45,14 @@ class WifiAwareTransport(
         currentChannel = channelName
         val wifiAwareManager = context.getSystemService(WifiAwareManager::class.java)
         if (wifiAwareManager == null) {
-            Log.e(TAG, "WiFi Aware not available")
+            Log.e(TAG, "WiFi Aware not available on this device")
+            supervisor?.onTransportFailed("WiFi Aware not available")
+            return
+        }
+
+        if (!wifiAwareManager.isAvailable) {
+            Log.e(TAG, "WiFi Aware not currently available (radio off or dozing)")
+            supervisor?.onTransportFailed("WiFi Aware radio not available")
             return
         }
 
@@ -50,12 +60,14 @@ class WifiAwareTransport(
             override fun onAttached(session: WifiAwareSession) {
                 Log.i(TAG, "WiFi Aware attached")
                 awareSession = session
+                supervisor?.onTransportAttached()
                 startUdpReceiver()
                 publish(channelName)
                 subscribe(channelName)
             }
             override fun onAttachFailed() {
                 Log.e(TAG, "WiFi Aware attach failed")
+                supervisor?.onTransportAttachFailed()
             }
         }, handler)
     }
@@ -72,17 +84,25 @@ class WifiAwareTransport(
                 override fun onPublishStarted(session: PublishDiscoverySession) {
                     publishSession = session
                     Log.i(TAG, "Publishing on $channelName")
+                    supervisor?.onTransportPublishing()
                 }
                 override fun onMessageReceived(peerHandle: PeerHandle, message: ByteArray) {
                     val peerId = String(message, Charsets.UTF_8)
                     Log.i(TAG, "Message from peer: $peerId, requesting network")
                     publishSession?.let { requestNetwork(it, peerHandle, peerId) }
                 }
+                override fun onSessionTerminated() {
+                    Log.w(TAG, "Publish session terminated")
+                    publishSession = null
+                    supervisor?.onTransportFailed("publish session terminated")
+                }
             }, handler)
         } catch (e: SecurityException) {
-            Log.e(TAG, "Location permission required for WiFi Aware publish: ${e.message}")
+            Log.e(TAG, "SecurityException in publish: ${e.message}")
+            supervisor?.onTransportFailed("SecurityException: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Publish failed: ${e.message}")
+            supervisor?.onTransportFailed("publish: ${e.message}")
         }
     }
 
@@ -109,12 +129,21 @@ class WifiAwareTransport(
                 override fun onSubscribeStarted(session: SubscribeDiscoverySession) {
                     subscribeSession = session
                     Log.i(TAG, "Subscribed to $channelName")
+                    supervisor?.onTransportDiscovering()
+                }
+
+                override fun onSessionTerminated() {
+                    Log.w(TAG, "Subscribe session terminated")
+                    subscribeSession = null
+                    supervisor?.onTransportFailed("subscribe session terminated")
                 }
             }, handler)
         } catch (e: SecurityException) {
-            Log.e(TAG, "Location permission required for WiFi Aware subscribe: ${e.message}")
+            Log.e(TAG, "SecurityException in subscribe: ${e.message}")
+            supervisor?.onTransportFailed("SecurityException: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Subscribe failed: ${e.message}")
+            supervisor?.onTransportFailed("subscribe: ${e.message}")
         }
     }
 
@@ -137,17 +166,27 @@ class WifiAwareTransport(
                 val peer = MeshPeer(peerId, peerAddr, udpPort)
                 connectedPeers[peerId] = peer
                 Log.i(TAG, "Connected to peer $peerId at $peerAddr")
+                supervisor?.onTransportConnected()
                 onPeerDiscovered?.invoke(peer)
             }
 
             override fun onLost(network: Network) {
-                connectedPeers.entries.removeIf { true } // simplified
-                Log.w(TAG, "Network lost")
+                val lostPeers = connectedPeers.keys.toList()
+                connectedPeers.clear()
+                Log.w(TAG, "Network lost (${lostPeers.size} peers)")
+                for (id in lostPeers) {
+                    onPeerLost?.invoke(id)
+                }
+                supervisor?.onTransportNetworkLost()
             }
         }, handler)
     }
 
     private fun startUdpReceiver() {
+        try {
+            udpSocket?.close()
+        } catch (_: Exception) {}
+
         udpSocket = DatagramSocket(udpPort)
         udpSocket?.soTimeout = 0 // blocking
 
@@ -202,12 +241,15 @@ class WifiAwareTransport(
 
     override fun stop() {
         receiveJob?.cancel()
-        udpSocket?.close()
+        try { udpSocket?.close() } catch (_: Exception) {}
+        udpSocket = null
         publishSession?.close()
+        publishSession = null
         subscribeSession?.close()
+        subscribeSession = null
         awareSession?.close()
+        awareSession = null
         connectedPeers.clear()
-        scope.cancel()
         Log.i(TAG, "Transport stopped")
     }
 }
