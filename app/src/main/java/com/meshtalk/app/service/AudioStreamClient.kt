@@ -182,6 +182,6 @@ class AudioStreamClient(
             Log.w(TAG, "Failed to detect USB gateway: ${e.message}")
         }
         // Fallback: typical Mac Mini LAN address (user should configure)
-        return "192.168.1.100"
+        return "127.0.0.1"  // Use ADB reverse tunnel: glasses:8435 → Mac Mini:8435
     }
 }
