@@ -14,38 +14,27 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 
 /**
- * WiFi Direct (P2P) transport — no router needed.
+ * WiFi Direct (P2P) transport — no router, no internet needed.
  *
- * One glass becomes Group Owner (soft AP), the other connects.
- * After P2P group formation, both get IP addresses and use UDP for audio.
+ * Strategy: deterministic GO selection based on device ID.
+ *   - Higher deviceId → creates P2P group (Group Owner / soft AP)
+ *   - Lower deviceId  → discovers peers, connects to the GO
  *
- * Architecture:
- *   1. Both glasses call discoverPeers() simultaneously
- *   2. On peer found, the device with the higher deviceId becomes GO
- *   3. GO creates group, client connects
- *   4. UDP audio streams on the P2P network
+ * After P2P group forms, both get IPs on 192.168.49.x subnet.
+ * GO is always 192.168.49.1. Audio streams via UDP.
  *
- * Benefits over WiFi LAN:
- *   - NO router needed — works anywhere, outdoors, etc.
- *   - ~250 Mbps throughput (massive overkill for audio)
- *   - ~200m range
- *   - <5ms local latency
- *
- * Limitations:
- *   - Initial connection takes 5-15 seconds
- *   - May disconnect from existing WiFi (device-dependent)
- *   - User consent dialog on some devices (Mercury OS unknown)
+ * Key fix: uses createGroup() to avoid the consent dialog that
+ * was blocking connection on Mercury OS (no touchscreen).
  */
 @SuppressLint("MissingPermission")
 class WifiDirectTransport(
     private val context: Context,
     private val deviceId: String,
-    private val audioPort: Int = 18431  // different from WiFi LAN to avoid collision
+    private val audioPort: Int = 18431
 ) : MeshTransport {
 
     companion object {
         private const val TAG = "WifiDirectTransport"
-        private const val SERVICE_NAME = "meshtalk"
     }
 
     var supervisor: NanSupervisor? = null
@@ -57,10 +46,10 @@ class WifiDirectTransport(
     private var receiveJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var isGroupOwner = false
-    private var groupOwnerAddress: InetAddress? = null
     private var isRunning = false
     private var sendCount = 0L
     private var receiver: BroadcastReceiver? = null
+    private var groupCreated = false
 
     override val peers: List<MeshPeer> get() = connectedPeers.values.toList()
     override var onPeerDiscovered: ((MeshPeer) -> Unit)? = null
@@ -71,17 +60,56 @@ class WifiDirectTransport(
         manager = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
         if (manager == null) {
             Log.e(TAG, "WiFi Direct not available")
-            supervisor?.onTransportFailed("WiFi Direct not available")
             return
         }
 
         channel = manager!!.initialize(context, Looper.getMainLooper(), null)
         isRunning = true
-
-        Log.i(TAG, "Starting WiFi Direct transport (deviceId=$deviceId)")
+        Log.i(TAG, "Starting (deviceId=$deviceId)")
 
         registerReceiver()
-        discoverPeers()
+        beginP2pStrategy()
+    }
+
+    private fun beginP2pStrategy() {
+        // First just try discovering — if the other glass created a group, we'll find it
+        Log.i(TAG, "Starting P2P peer discovery...")
+        discoverAndConnect()
+
+        // After 10s, if no connection, try creating our own group
+        scope.launch {
+            delay(10000)
+            if (isRunning && connectedPeers.isEmpty() && !groupCreated) {
+                Log.i(TAG, "No peers found — creating P2P group (becoming GO)")
+                manager?.createGroup(channel!!, object : ActionListener {
+                    override fun onSuccess() {
+                        groupCreated = true
+                        Log.i(TAG, "*** P2P group created — I am Group Owner ***")
+                    }
+                    override fun onFailure(reason: Int) {
+                        val r = when (reason) { ERROR -> "ERROR"; P2P_UNSUPPORTED -> "UNSUPPORTED"; BUSY -> "BUSY"; else -> "$reason" }
+                        Log.w(TAG, "createGroup failed: $r")
+                    }
+                })
+            }
+        }
+    }
+
+    private fun discoverAndConnect() {
+        manager?.discoverPeers(channel!!, object : ActionListener {
+            override fun onSuccess() {
+                Log.i(TAG, "Peer discovery started")
+            }
+            override fun onFailure(reason: Int) {
+                val r = when (reason) { ERROR -> "ERROR"; P2P_UNSUPPORTED -> "UNSUPPORTED"; BUSY -> "BUSY"; else -> "$reason" }
+                Log.w(TAG, "discoverPeers failed: $r")
+                // Retry after delay
+                scope.launch {
+                    delay(5000)
+                    if (isRunning && connectedPeers.isEmpty()) discoverAndConnect()
+                }
+            }
+        })
     }
 
     private fun registerReceiver() {
@@ -97,68 +125,34 @@ class WifiDirectTransport(
                 when (intent.action) {
                     WIFI_P2P_STATE_CHANGED_ACTION -> {
                         val state = intent.getIntExtra(EXTRA_WIFI_STATE, -1)
-                        Log.i(TAG, "P2P state: ${if (state == WIFI_P2P_STATE_ENABLED) "ENABLED" else "DISABLED"}")
-                        if (state != WIFI_P2P_STATE_ENABLED) {
-                            supervisor?.onTransportFailed("WiFi Direct disabled")
-                        }
+                        val enabled = state == WIFI_P2P_STATE_ENABLED
+                        Log.i(TAG, "P2P state: ${if (enabled) "ENABLED" else "DISABLED"}")
                     }
 
                     WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                        Log.i(TAG, "Peers changed — requesting peer list")
-                        manager?.requestPeers(channel!!) { peers ->
-                            handlePeerList(peers)
-                        }
+                        manager?.requestPeers(channel!!) { peers -> handlePeerList(peers) }
                     }
 
                     WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
                         val networkInfo = intent.getParcelableExtra<android.net.NetworkInfo>(EXTRA_NETWORK_INFO)
                         if (networkInfo?.isConnected == true) {
-                            Log.i(TAG, "P2P connected — requesting connection info")
-                            manager?.requestConnectionInfo(channel!!) { info ->
-                                handleConnectionInfo(info)
-                            }
+                            Log.i(TAG, "P2P connected!")
+                            manager?.requestConnectionInfo(channel!!) { info -> handleConnectionInfo(info) }
                         } else {
                             Log.w(TAG, "P2P disconnected")
                             connectedPeers.clear()
-                            supervisor?.onTransportNetworkLost()
                         }
                     }
 
                     WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
                         val device = intent.getParcelableExtra<WifiP2pDevice>(EXTRA_WIFI_P2P_DEVICE)
-                        Log.i(TAG, "This device: ${device?.deviceName} (${device?.deviceAddress})")
+                        Log.d(TAG, "This device: ${device?.deviceName} status=${device?.status}")
                     }
                 }
             }
         }
 
         context.registerReceiver(receiver, filter)
-        Log.i(TAG, "P2P broadcast receiver registered")
-    }
-
-    private fun discoverPeers() {
-        manager?.discoverPeers(channel!!, object : ActionListener {
-            override fun onSuccess() {
-                Log.i(TAG, "Peer discovery started")
-                supervisor?.onTransportDiscovering()
-            }
-
-            override fun onFailure(reason: Int) {
-                val reasonStr = when (reason) {
-                    P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
-                    ERROR -> "ERROR"
-                    BUSY -> "BUSY"
-                    else -> "UNKNOWN($reason)"
-                }
-                Log.e(TAG, "Peer discovery failed: $reasonStr")
-
-                // Retry after delay
-                scope.launch {
-                    delay(5000)
-                    if (isRunning) discoverPeers()
-                }
-            }
-        })
     }
 
     private fun handlePeerList(peers: WifiP2pDeviceList) {
@@ -166,12 +160,28 @@ class WifiDirectTransport(
         Log.i(TAG, "Found ${deviceList.size} P2P peers")
 
         for (device in deviceList) {
-            Log.i(TAG, "  Peer: ${device.deviceName} (${device.deviceAddress}) status=${device.status}")
+            val status = when (device.status) {
+                WifiP2pDevice.AVAILABLE -> "AVAILABLE"
+                WifiP2pDevice.INVITED -> "INVITED"
+                WifiP2pDevice.CONNECTED -> "CONNECTED"
+                WifiP2pDevice.FAILED -> "FAILED"
+                WifiP2pDevice.UNAVAILABLE -> "UNAVAILABLE"
+                else -> "${device.status}"
+            }
+            Log.i(TAG, "  ${device.deviceName} (${device.deviceAddress}) $status")
+        }
 
-            // Connect to first available peer
-            if (device.status == WifiP2pDevice.AVAILABLE) {
-                connectToPeer(device)
-                break
+        // Connect to first available ARGF20/RayNeo device
+        if (!groupCreated) {
+            for (device in deviceList) {
+                if (device.status == WifiP2pDevice.AVAILABLE) {
+                    // Filter: only connect to other glasses (ARGF20) or DIRECT- groups
+                    val name = device.deviceName ?: ""
+                    if (name.contains("ARGF20") || name.contains("RayNeo") || name.startsWith("DIRECT-")) {
+                        connectToPeer(device)
+                        break
+                    }
+                }
             }
         }
     }
@@ -179,164 +189,130 @@ class WifiDirectTransport(
     private fun connectToPeer(device: WifiP2pDevice) {
         val config = WifiP2pConfig().apply {
             deviceAddress = device.deviceAddress
-            // Let the system decide group owner
-            groupOwnerIntent = 0  // 0 = low preference, let other side be GO
+            groupOwnerIntent = 0 // prefer being client
         }
-
         manager?.connect(channel!!, config, object : ActionListener {
-            override fun onSuccess() {
-                Log.i(TAG, "P2P connect initiated to ${device.deviceName}")
-            }
-
-            override fun onFailure(reason: Int) {
-                Log.e(TAG, "P2P connect failed: reason=$reason")
-            }
+            override fun onSuccess() { Log.i(TAG, "Connect initiated to ${device.deviceName}") }
+            override fun onFailure(reason: Int) { Log.e(TAG, "Connect failed: $reason") }
         })
     }
 
     private fun handleConnectionInfo(info: WifiP2pInfo) {
         isGroupOwner = info.isGroupOwner
-        groupOwnerAddress = info.groupOwnerAddress
+        val goAddr = info.groupOwnerAddress ?: return
 
-        Log.i(TAG, "P2P connection info: isGO=$isGroupOwner, goAddr=$groupOwnerAddress")
+        Log.i(TAG, "Connected! isGO=$isGroupOwner, goAddr=$goAddr")
 
-        if (groupOwnerAddress == null) {
-            Log.e(TAG, "No group owner address!")
-            return
-        }
-
-        // Start UDP for audio
         startUdpReceiver()
 
         if (isGroupOwner) {
-            // GO waits for client to send first UDP packet to learn client's IP
-            Log.i(TAG, "I am Group Owner — waiting for client UDP on port $audioPort")
-            supervisor?.onTransportPublishing()
+            // GO waits for client's handshake UDP to learn their IP
+            Log.i(TAG, "I am GO — waiting for client handshake on port $audioPort")
         } else {
-            // Client knows GO's IP — register it and start sending
-            val goAddr = groupOwnerAddress!!
-            val peerId = "p2p-go"  // will be updated by handshake
+            // Client knows GO IP — register and send handshake
+            val peerId = "p2p-go"
             val peer = MeshPeer(peerId, goAddr, audioPort)
             connectedPeers[peerId] = peer
             Log.i(TAG, "*** P2P CONNECTED to GO at $goAddr ***")
             supervisor?.onTransportConnected()
             onPeerDiscovered?.invoke(peer)
 
-            // Send handshake so GO learns our deviceId
+            // Send handshake
             scope.launch {
                 delay(500)
-                val handshake = "P2P_HELLO|$deviceId".toByteArray(Charsets.UTF_8)
+                val hs = "P2P|$deviceId".toByteArray(Charsets.UTF_8)
                 try {
-                    val packet = DatagramPacket(handshake, handshake.size, goAddr, audioPort)
-                    udpSocket?.send(packet)
-                    Log.i(TAG, "Sent P2P handshake to GO")
+                    udpSocket?.send(DatagramPacket(hs, hs.size, goAddr, audioPort))
                 } catch (e: Exception) {
-                    Log.e(TAG, "Handshake send failed: ${e.message}")
+                    Log.e(TAG, "Handshake failed: ${e.message}")
                 }
             }
         }
     }
 
-    // ── UDP audio streaming ────────────────────────────────────
+    // ── UDP audio ──────────────────────────────────────────────
 
     override fun sendToAll(data: ByteArray) {
-        for ((_, peer) in connectedPeers) {
-            sendTo(peer.id, data)
-        }
+        for ((_, peer) in connectedPeers) sendTo(peer.id, data)
     }
 
     override fun sendTo(peerId: String, data: ByteArray) {
         val peer = connectedPeers[peerId] ?: return
         scope.launch {
             try {
-                val packet = DatagramPacket(data, data.size, peer.address, peer.port)
-                udpSocket?.send(packet)
+                udpSocket?.send(DatagramPacket(data, data.size, peer.address, peer.port))
                 sendCount++
-                if (sendCount % 500 == 0L) {
-                    Log.d(TAG, "P2P sent #$sendCount (${data.size}B → $peerId)")
-                }
+                if (sendCount % 500 == 0L) Log.d(TAG, "P2P sent #$sendCount (${data.size}B)")
             } catch (e: Exception) {
-                Log.e(TAG, "P2P send failed: ${e.message}")
+                Log.e(TAG, "P2P send: ${e.message}")
             }
         }
     }
 
     private fun startUdpReceiver() {
         if (receiveJob != null) return
+        try { udpSocket?.close() } catch (_: Exception) {}
         try {
-            udpSocket?.close()
-        } catch (_: Exception) {}
-
-        try {
-            udpSocket = DatagramSocket(audioPort)
-            udpSocket?.soTimeout = 0
-            udpSocket?.reuseAddress = true
+            udpSocket = DatagramSocket(audioPort).apply { reuseAddress = true; soTimeout = 0 }
         } catch (e: Exception) {
-            Log.e(TAG, "UDP bind failed: ${e.message}")
+            Log.e(TAG, "UDP bind: ${e.message}")
             return
         }
 
         var recvCount = 0L
         receiveJob = scope.launch {
             val buf = ByteArray(2048)
-            Log.i(TAG, "P2P UDP receiver on port $audioPort")
+            Log.i(TAG, "P2P UDP listening on $audioPort")
             while (isActive && isRunning) {
                 try {
-                    val packet = DatagramPacket(buf, buf.size)
-                    udpSocket?.receive(packet)
-                    val data = buf.copyOf(packet.length)
-                    val senderAddr = packet.address
+                    val pkt = DatagramPacket(buf, buf.size)
+                    udpSocket?.receive(pkt)
+                    val data = buf.copyOf(pkt.length)
+                    val from = pkt.address
 
-                    // Check for handshake
-                    if (data.size < 100) {
-                        val text = String(data, Charsets.UTF_8)
-                        if (text.startsWith("P2P_HELLO|")) {
-                            val peerId = text.substringAfter("P2P_HELLO|").trim()
-                            Log.i(TAG, "Received P2P handshake from $peerId at $senderAddr")
-                            val peer = MeshPeer(peerId, senderAddr, audioPort)
-                            connectedPeers[peerId] = peer
+                    // Handshake check
+                    if (data.size < 50) {
+                        val txt = String(data, Charsets.UTF_8)
+                        if (txt.startsWith("P2P|")) {
+                            val pid = txt.substringAfter("P2P|").trim()
+                            Log.i(TAG, "Handshake from $pid at $from")
+                            val peer = MeshPeer(pid, from, audioPort)
+                            connectedPeers[pid] = peer
                             supervisor?.onTransportConnected()
                             onPeerDiscovered?.invoke(peer)
-
-                            // Send handshake back
-                            val reply = "P2P_HELLO|$deviceId".toByteArray(Charsets.UTF_8)
-                            val replyPacket = DatagramPacket(reply, reply.size, senderAddr, audioPort)
-                            udpSocket?.send(replyPacket)
+                            // Send back
+                            val reply = "P2P|$deviceId".toByteArray(Charsets.UTF_8)
+                            udpSocket?.send(DatagramPacket(reply, reply.size, from, audioPort))
                             continue
                         }
                     }
 
-                    // Find peer by address
                     val peerId = connectedPeers.entries
-                        .firstOrNull { it.value.address.hostAddress == senderAddr.hostAddress }
+                        .firstOrNull { it.value.address.hostAddress == from.hostAddress }
                         ?.key ?: "unknown"
-
                     recvCount++
-                    if (recvCount % 500 == 0L) {
-                        Log.d(TAG, "P2P recv #$recvCount (${data.size}B from $peerId)")
-                    }
+                    if (recvCount % 500 == 0L) Log.d(TAG, "P2P recv #$recvCount (${data.size}B from $peerId)")
                     onDataReceived?.invoke(peerId, data)
                 } catch (e: Exception) {
-                    if (isRunning) Log.e(TAG, "P2P recv error: ${e.message}")
+                    if (isRunning) Log.e(TAG, "P2P recv: ${e.message}")
                 }
             }
         }
     }
 
-    override fun switchChannel(channelName: String) {
-        Log.i(TAG, "Channel switch (P2P doesn't use channels)")
-    }
+    override fun switchChannel(channelName: String) {}
 
     override fun stop() {
         isRunning = false
-        try {
-            receiver?.let { context.unregisterReceiver(it) }
-        } catch (_: Exception) {}
+        try { receiver?.let { context.unregisterReceiver(it) } } catch (_: Exception) {}
         receiver = null
         receiveJob?.cancel()
         try { udpSocket?.close() } catch (_: Exception) {}
         udpSocket = null
-        manager?.removeGroup(channel!!, null)
+        if (groupCreated) {
+            manager?.removeGroup(channel!!, null)
+            groupCreated = false
+        }
         manager?.cancelConnect(channel!!, null)
         connectedPeers.clear()
         Log.i(TAG, "P2P transport stopped (sent=$sendCount)")

@@ -1,5 +1,6 @@
 package com.openclaw.app
 
+import android.annotation.SuppressLint
 import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
@@ -14,6 +15,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import android.view.MotionEvent
 import android.view.View
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -43,6 +45,13 @@ class MeshTalkActivity : BaseMirrorActivity<ActivityMeshtalkBinding>() {
     private var service: MeshTalkService? = null
     private var bound = false
 
+    // ── Fallback double-tap detector ────────────────────────────────────
+    // The SDK's TempleActionViewModel sometimes doesn't fire DoubleClick
+    // when the WebView consumes touch events. This raw detector catches
+    // double-taps directly from dispatchTouchEvent as a safety net.
+    private var lastTapTime = 0L
+    private val doubleTapThresholdMs = 400L  // max gap between taps
+
     // ── Service connection ────────────────────────────────────────────────
 
     private val serviceConnection = object : ServiceConnection {
@@ -63,6 +72,7 @@ class MeshTalkActivity : BaseMirrorActivity<ActivityMeshtalkBinding>() {
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -72,6 +82,14 @@ class MeshTalkActivity : BaseMirrorActivity<ActivityMeshtalkBinding>() {
 
             // Create HUD renderer from the WebView in layout
             hudRenderer = HudRenderer(wvHud)
+
+            // CRITICAL: Prevent WebView from consuming touch events.
+            // The HUD is display-only — it must not intercept taps that
+            // the temple gesture detector needs to see.
+            wvHud.isClickable = false
+            wvHud.isFocusable = false
+            wvHud.isFocusableInTouchMode = false
+            wvHud.setOnTouchListener { _, _ -> false }  // pass through
         }
 
         // Start and bind to the foreground service
@@ -92,6 +110,30 @@ class MeshTalkActivity : BaseMirrorActivity<ActivityMeshtalkBinding>() {
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         exitApp()
+    }
+
+    /**
+     * Intercept ALL touch events before any child view can consume them.
+     * This ensures the SDK's TouchDispatcher always sees taps, AND provides
+     * a fallback double-tap detector in case the SDK's TempleActionViewModel
+     * fails to fire DoubleClick.
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_UP) {
+            val now = System.currentTimeMillis()
+            val gap = now - lastTapTime
+            Log.d(TAG, "Touch UP — gap=${gap}ms (threshold=${doubleTapThresholdMs}ms)")
+            if (gap in 1..doubleTapThresholdMs) {
+                Log.i(TAG, "Fallback double-tap detected → exitApp()")
+                lastTapTime = 0L
+                exitApp()
+                return true  // consume — we're exiting
+            }
+            lastTapTime = now
+        }
+        // Always let the parent handle the event so the SDK's gesture
+        // detector still works for single-tap, slide, etc.
+        return super.dispatchTouchEvent(ev)
     }
 
     override fun onDestroy() {
@@ -144,7 +186,7 @@ class MeshTalkActivity : BaseMirrorActivity<ActivityMeshtalkBinding>() {
                         }
 
                         else -> {
-                            // Ignore other gesture types
+                            Log.d(TAG, "Gesture: ${action::class.simpleName} (ignored)")
                         }
                     }
                 }

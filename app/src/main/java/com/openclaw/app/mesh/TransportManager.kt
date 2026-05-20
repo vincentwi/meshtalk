@@ -41,15 +41,14 @@ class TransportManager(
     override var onDataReceived: ((String, ByteArray) -> Unit)? = null
 
     override fun start(channelName: String) {
-        Log.i(TAG, "Starting all transports in parallel...")
+        Log.i(TAG, "Starting transports (WiFi LAN + BT RFCOMM)...")
 
-        // Wire each transport's callbacks
-        wireTransport("WiFiDirect", wifiDirectTransport, priority = 1)
+        // WiFi Direct disabled — Mercury OS kills the app when P2P APIs are called
+        // wireTransport("WiFiDirect", wifiDirectTransport, priority = 1)
         wireTransport("WiFiLAN", wifiLanTransport, priority = 2)
         wireTransport("BT_RFCOMM", btRfcommTransport, priority = 3)
 
-        // Start all simultaneously — first to connect wins
-        wifiDirectTransport.start(channelName)
+        // wifiDirectTransport.start(channelName)  // disabled
         wifiLanTransport.start(channelName)
         btRfcommTransport.start(channelName)
     }

@@ -213,8 +213,14 @@ class BluetoothRfcommTransport(
     private fun startServer() {
         serverJob = scope.launch {
             try {
-                serverSocket = adapter!!.listenUsingRfcommWithServiceRecord(SERVICE_NAME, MESHTALK_UUID)
-                Log.i(TAG, "RFCOMM server listening")
+                // Try secure first, fall back to insecure (no pairing needed)
+                serverSocket = try {
+                    adapter!!.listenUsingRfcommWithServiceRecord(SERVICE_NAME, MESHTALK_UUID)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Secure RFCOMM failed, trying insecure: ${e.message}")
+                    adapter!!.listenUsingInsecureRfcommWithServiceRecord(SERVICE_NAME, MESHTALK_UUID)
+                }
+                Log.i(TAG, "RFCOMM server listening (insecure OK)")
                 supervisor?.onTransportPublishing()
 
                 while (isRunning && isActive) {
@@ -240,71 +246,82 @@ class BluetoothRfcommTransport(
 
     private fun startClient() {
         connectJob = scope.launch {
-            // Wait a bit for server to start on both sides
             delay(2000)
-
             if (adapter == null) return@launch
 
-            // Try connecting to all paired RayNeo devices
-            val pairedDevices = adapter.bondedDevices ?: return@launch
-            Log.i(TAG, "Found ${pairedDevices.size} paired devices")
+            // Strategy: try connecting to known RayNeo MACs via insecure RFCOMM
+            // Mercury OS blocks BT pairing, so we use insecure (no-pair) RFCOMM
+            val knownGlasses = mutableListOf<BluetoothDevice>()
 
-            for (device in pairedDevices) {
-                if (!isRunning) break
+            // Add specifically targeted device
+            if (targetMac != null) {
+                knownGlasses.add(adapter.getRemoteDevice(targetMac))
+            }
 
-                // Skip if already connected to this device
-                if (connectedPeers.containsKey(device.address)) continue
+            // Add any paired RayNeo devices
+            adapter.bondedDevices?.filter {
+                it.name?.contains("RayNeo") == true || it.name?.contains("ARGF20") == true
+            }?.let { knownGlasses.addAll(it) }
 
-                // Optionally filter to specific target
-                if (targetMac != null && device.address != targetMac) continue
-
-                // Only try RayNeo devices (or all if no filter)
-                val name = device.name ?: ""
-                Log.i(TAG, "Trying to connect to: $name (${device.address})")
-
-                try {
-                    val socket = device.createRfcommSocketToServiceRecord(MESHTALK_UUID)
-                    // Cancel discovery to speed up connection
-                    adapter.cancelDiscovery()
-
-                    withTimeout(10000) {
-                        socket.connect()
+            // Also try the OTHER glass by known MAC pattern (A0:6B:4A:xx:xx:xx)
+            // Both glasses have MACs starting with A0:6B:4A
+            val knownMacs = listOf("A0:6B:4A:59:04:F4", "A0:6B:4A:B7:FA:E3")
+            for (mac in knownMacs) {
+                if (mac != adapter.address) { // don't connect to ourselves
+                    val dev = adapter.getRemoteDevice(mac)
+                    if (!knownGlasses.any { it.address == mac }) {
+                        knownGlasses.add(dev)
                     }
-                    Log.i(TAG, "Connected to $name (${device.address})")
-                    handleConnection(socket, device.address)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Connect to ${device.address} failed: ${e.message}")
                 }
             }
 
-            // If no connection established, retry periodically
+            Log.i(TAG, "Trying ${knownGlasses.size} known glasses: ${knownGlasses.map { "${it.name ?: "?"}(${it.address})" }}")
+
+            for (device in knownGlasses) {
+                if (!isRunning || connectedPeers.isNotEmpty()) break
+
+                try {
+                    Log.i(TAG, "Connecting insecure RFCOMM to ${device.name ?: device.address}")
+                    val socket = device.createInsecureRfcommSocketToServiceRecord(MESHTALK_UUID)
+                    adapter.cancelDiscovery()
+                    withTimeout(8000) { socket.connect() }
+                    Log.i(TAG, "*** BT CONNECTED to ${device.name ?: device.address} ***")
+                    handleConnection(socket, device.address)
+                    return@launch
+                } catch (e: Exception) {
+                    Log.w(TAG, "Insecure RFCOMM to ${device.address}: ${e.message}")
+                }
+            }
+
+            // Retry loop
             while (isRunning && connectedPeers.isEmpty()) {
                 delay(5000)
-                Log.d(TAG, "Retrying BT connections...")
-                for (device in pairedDevices) {
+                for (device in knownGlasses) {
                     if (!isRunning || connectedPeers.isNotEmpty()) break
-                    if (targetMac != null && device.address != targetMac) continue
-
                     try {
-                        val socket = device.createRfcommSocketToServiceRecord(MESHTALK_UUID)
+                        val socket = device.createInsecureRfcommSocketToServiceRecord(MESHTALK_UUID)
                         adapter.cancelDiscovery()
-                        withTimeout(10000) { socket.connect() }
+                        withTimeout(8000) { socket.connect() }
                         handleConnection(socket, device.address)
-                    } catch (e: Exception) {
-                        Log.d(TAG, "Retry to ${device.address}: ${e.message}")
-                    }
+                        return@launch
+                    } catch (_: Exception) {}
                 }
             }
         }
     }
 
     private fun handleConnection(socket: BluetoothSocket, remoteMac: String) {
-        // Deduplicate — if already connected, close extra socket
+        // Deduplicate — if already connected to this device via another path, close extra
         if (peerSockets.containsKey(remoteMac)) {
+            Log.i(TAG, "Already connected to $remoteMac — closing duplicate socket")
             try { socket.close() } catch (_: Exception) {}
             return
         }
 
+        // Cancel the client connect job since we have a connection
+        connectJob?.cancel()
+
+        Log.i(TAG, "Handling BT connection to $remoteMac")
         val outputStream = socket.outputStream
         peerSockets[remoteMac] = socket
         peerOutputStreams[remoteMac] = outputStream
