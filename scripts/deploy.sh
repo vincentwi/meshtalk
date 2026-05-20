@@ -17,39 +17,50 @@ echo "=== Found ${#SERIALS[@]} glasses ==="
 for SERIAL in "${SERIALS[@]}"; do
     echo ""
     echo "=== Deploying to $SERIAL ==="
+
+    # Uninstall first to avoid Mercury OS stopped-state bug
+    $ADB -s $SERIAL shell pm uninstall $PKG 2>/dev/null || true
+    sleep 2
+
     $ADB -s $SERIAL shell settings put global mercury_install_allowed 1
-    $ADB -s $SERIAL install -r $APK
-    
-    # Grant permissions
+    $ADB -s $SERIAL install $APK
+
+    # Grant runtime permissions
     $ADB -s $SERIAL shell pm grant $PKG android.permission.RECORD_AUDIO 2>/dev/null || true
     $ADB -s $SERIAL shell pm grant $PKG android.permission.ACCESS_FINE_LOCATION 2>/dev/null || true
     $ADB -s $SERIAL shell pm grant $PKG android.permission.ACCESS_COARSE_LOCATION 2>/dev/null || true
     $ADB -s $SERIAL shell pm grant $PKG android.permission.WRITE_SECURE_SETTINGS 2>/dev/null || true
-    
-    # Battery optimization whitelist (prevents doze from killing service)
+
+    # CRITICAL: AppOps allow (not foreground-only) for WiFi Aware
+    $ADB -s $SERIAL shell appops set $PKG android:coarse_location allow
+    $ADB -s $SERIAL shell appops set $PKG android:fine_location allow
+
+    # Battery optimization whitelist
     $ADB -s $SERIAL shell dumpsys deviceidle whitelist +$PKG 2>/dev/null || true
-    
-    # Enable WiFi and WiFi Aware (Mercury OS disables aware by default)
+
+    # Enable WiFi + WiFi Aware
     $ADB -s $SERIAL shell svc wifi enable
     $ADB -s $SERIAL shell settings put secure aware_enabled 1
-    
-    # Set up ADB reverse tunnel for streaming server
+
+    # ADB reverse tunnel for streaming server
     $ADB -s $SERIAL reverse tcp:8435 tcp:8435
-    
+
     sleep 2
     $ADB -s $SERIAL shell am start -n $PKG/.MeshTalkActivity
-    echo "    ✓ Deployed and launched on $SERIAL"
+    echo "    ✓ Deployed on $SERIAL"
 done
 
 echo ""
 echo "=== All glasses deployed ==="
+echo ""
 echo "Streaming server: http://localhost:8435"
-echo "WiFi Aware enabled, reverse tunnels active"
+echo "WiFi Aware enabled, AppOps location=allow, battery whitelist set"
+echo ""
+echo "TIP: Run scripts/watchdog.sh to keep app alive against Mercury OS kills"
 echo ""
 
-# Check server status
 if curl -s http://localhost:8435/api/status >/dev/null 2>&1; then
     echo "Server status: $(curl -s http://localhost:8435/api/status)"
 else
-    echo "⚠ Streaming server not running. Start with: cd server && ./start.sh"
+    echo "⚠ Streaming server not running. Start with: cd server && .venv/bin/python3 server.py"
 fi
