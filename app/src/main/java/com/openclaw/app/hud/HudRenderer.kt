@@ -105,6 +105,15 @@ class HudRenderer(private val webView: WebView) {
         runJs("HUD.updateRadioState('${escapeJs(state)}')")
     }
 
+    /**
+     * Update the BLE connection state indicator on the HUD.
+     * States: DISCONNECTED, SCANNING, CONNECTING, DISCOVERING_SERVICES,
+     *         ENABLING_NOTIFICATIONS, CONNECTED, RECONNECTING
+     */
+    fun updateBleState(state: String) {
+        runJs("HUD.updateBleState('${escapeJs(state)}')")
+    }
+
     // ── Internal helpers ────────────────────────────────────────────────
 
     /**

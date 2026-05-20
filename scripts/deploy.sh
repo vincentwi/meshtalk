@@ -31,6 +31,9 @@ for SERIAL in "${SERIALS[@]}"; do
     $ADB -s $SERIAL shell pm grant $PKG android.permission.ACCESS_COARSE_LOCATION 2>/dev/null || true
     $ADB -s $SERIAL shell pm grant $PKG android.permission.ACCESS_BACKGROUND_LOCATION 2>/dev/null || true
     $ADB -s $SERIAL shell pm grant $PKG android.permission.WRITE_SECURE_SETTINGS 2>/dev/null || true
+    $ADB -s $SERIAL shell pm grant $PKG android.permission.BLUETOOTH_CONNECT 2>/dev/null || true
+    $ADB -s $SERIAL shell pm grant $PKG android.permission.BLUETOOTH_SCAN 2>/dev/null || true
+    $ADB -s $SERIAL shell pm grant $PKG android.permission.BLUETOOTH_ADVERTISE 2>/dev/null || true
 
     # CRITICAL: AppOps allow (not foreground-only) for WiFi Aware
     $ADB -s $SERIAL shell appops set $PKG android:coarse_location allow

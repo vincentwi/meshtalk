@@ -172,7 +172,7 @@ html, body {
   <div id="channel-name">DEFAULT</div>
   <div id="user-count">0 on</div>
   <div id="radio-state">
-    <span id="radio-label">DISABLED</span>
+    <span id="radio-label">BLE: Scanning...</span>
     <span id="radio-dot"></span>
   </div>
 </div>
@@ -354,29 +354,45 @@ html, body {
      *         PUBLISHING, DISCOVERING, CONNECTED, DOZING, RECOVERING, FAILED
      */
     updateRadioState: function(state) {
-      var s = (state || 'DISABLED').toUpperCase();
-      elRadioLabel.textContent = s;
+      // Legacy — forward to BLE state display
+      this.updateBleState(state);
+    },
+
+    /**
+     * Update BLE connection state indicator.
+     * States: DISCONNECTED, SCANNING, CONNECTING, DISCOVERING_SERVICES,
+     *         ENABLING_NOTIFICATIONS, CONNECTED, RECONNECTING
+     */
+    updateBleState: function(state) {
+      var s = (state || 'DISCONNECTED').toUpperCase();
 
       // Remove all color classes
       elRadioDot.className = '';
       elRadioDot.id = 'radio-dot';
 
-      // Map state → dot color
+      var label;
       var colorClass;
       switch (s) {
         case 'CONNECTED':
+          label = 'BLE: Connected to Phone';
           colorClass = 'green'; break;
-        case 'ATTACHING': case 'ATTACHED':
-        case 'PUBLISHING': case 'DISCOVERING':
+        case 'SCANNING':
+          label = 'BLE: Scanning...';
           colorClass = 'yellow'; break;
-        case 'RECOVERING':
+        case 'CONNECTING':
+        case 'DISCOVERING_SERVICES':
+        case 'ENABLING_NOTIFICATIONS':
+          label = 'BLE: Connecting...';
+          colorClass = 'yellow'; break;
+        case 'RECONNECTING':
+          label = 'BLE: Reconnecting...';
           colorClass = 'orange'; break;
-        case 'DOZING':
-          colorClass = 'blue'; break;
-        case 'FAILED': case 'WIFI_OFF': case 'AWARE_DISABLED': case 'DISABLED':
+        case 'DISCONNECTED':
         default:
+          label = 'BLE: Disconnected';
           colorClass = 'red'; break;
       }
+      elRadioLabel.textContent = label;
       elRadioDot.classList.add(colorClass);
     }
   };

@@ -181,9 +181,9 @@ class MeshTalkActivity : BaseMirrorActivity<ActivityMeshtalkBinding>() {
             }
         }
 
-        svc.onRadioStateChanged = { state ->
+        svc.onBleStateChanged = { state ->
             runOnUiThread {
-                hudRenderer.updateRadioState(state)
+                hudRenderer.updateBleState(state)
             }
         }
     }

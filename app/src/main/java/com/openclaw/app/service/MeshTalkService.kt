@@ -12,7 +12,6 @@ import com.openclaw.app.audio.*
 import com.openclaw.app.mesh.*
 import com.openclaw.app.vox.VoxStateMachine
 import com.openclaw.app.vox.VoxState
-import com.openclaw.app.mesh.NanSupervisor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import org.json.JSONObject
@@ -40,12 +39,14 @@ class MeshTalkService : Service() {
     lateinit var headTracker: HeadTracker
     lateinit var spatialEngine: SpatialAudioEngine
 
-    // Audio streaming to server
+    // Audio streaming to server (secondary path — Mac Mini relay)
     private var audioStreamClient: AudioStreamClient? = null
 
-    // Mesh
-    lateinit var transport: MeshTransport
-    lateinit var nanSupervisor: NanSupervisor
+    // BLE phone client (primary mesh transport)
+    var blePhoneClient: BlePhoneClient? = null
+        private set
+
+    // Mesh (channel manager still used for channel state, but no longer drives NAN transport)
     lateinit var peerManager: PeerManager
     lateinit var channelManager: ChannelManager
 
@@ -63,7 +64,7 @@ class MeshTalkService : Service() {
     var onPeerCountChanged: ((Int) -> Unit)? = null
     var onChannelChanged: ((String) -> Unit)? = null
     var onPeerDirectionChanged: ((Float, Float) -> Unit)? = null  // angle, distance
-    var onRadioStateChanged: ((String) -> Unit)? = null
+    var onBleStateChanged: ((String) -> Unit)? = null
 
     private val binder = LocalBinder()
     inner class LocalBinder : Binder() {
@@ -88,7 +89,7 @@ class MeshTalkService : Service() {
     }
 
     private fun initPipeline() {
-        // Use ANDROID_ID as unique device identifier (Build.SERIAL is "unknown" on modern Android)
+        // Use ANDROID_ID as unique device identifier
         val androidId = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
         val deviceId = androidId?.takeLast(6) ?: "glass_${System.currentTimeMillis() % 100000}"
 
@@ -106,20 +107,22 @@ class MeshTalkService : Service() {
         headTracker = HeadTracker(this)
         spatialEngine = SpatialAudioEngine()
 
-        // Mesh components — NanSupervisor wraps WifiAwareTransport for self-healing
-        val wifiTransport = WifiAwareTransport(this, deviceId)
-        transport = wifiTransport
-        nanSupervisor = NanSupervisor(this, wifiTransport)
-        peerManager = PeerManager(transport)
-        peerManager.deviceId = deviceId
-        channelManager = ChannelManager(transport, peerManager)
-
-        // Wire radio state changes to HUD
-        nanSupervisor.onStateChanged = { state ->
-            val stateName = state.name
-            Log.i(TAG, "Radio state: $stateName")
-            onRadioStateChanged?.invoke(stateName)
+        // Create a no-op MeshTransport stub for PeerManager/ChannelManager
+        // (BLE replaces transport, but these still manage channel/peer state)
+        val stubTransport = object : MeshTransport {
+            override val peers: List<MeshPeer> get() = emptyList()
+            override var onPeerDiscovered: ((MeshPeer) -> Unit)? = null
+            override var onPeerLost: ((String) -> Unit)? = null
+            override var onDataReceived: ((String, ByteArray) -> Unit)? = null
+            override fun start(channelName: String) {}
+            override fun stop() {}
+            override fun switchChannel(channelName: String) {}
+            override fun sendToAll(data: ByteArray) {}
+            override fun sendTo(peerId: String, data: ByteArray) {}
         }
+        peerManager = PeerManager(stubTransport)
+        peerManager.deviceId = deviceId
+        channelManager = ChannelManager(stubTransport, peerManager)
 
         // Init native libs
         opusCodec.init()
@@ -128,27 +131,80 @@ class MeshTalkService : Service() {
         // Callbacks
         voxStateMachine.onStateChanged = { state ->
             onVoxStateChanged?.invoke(state)
+            // Notify phone of VOX state changes
+            blePhoneClient?.sendVoxState(state != VoxState.IDLE)
         }
         peerManager.onPeerCountChanged = { count ->
             onPeerCountChanged?.invoke(count)
         }
         channelManager.onChannelChanged = { channel ->
             onChannelChanged?.invoke(channel.displayName)
+            // Notify phone of channel switch
+            blePhoneClient?.sendChannelSwitch(channel.id, channel.displayName)
         }
 
-        // Mesh data handler
-        transport.onDataReceived = { peerId, data ->
-            peerManager.onPeerDataReceived(peerId)
-            handleIncomingPacket(peerId, data)
+        // ── BLE Phone Client (primary mesh transport) ──────────────────
+        val ble = BlePhoneClient(this, deviceId)
+        blePhoneClient = ble
+
+        // Wire BLE state changes to HUD
+        ble.onStateChanged = { bleState ->
+            val stateName = bleState.name
+            Log.i(TAG, "BLE state: $stateName")
+            onBleStateChanged?.invoke(stateName)
         }
-        transport.onPeerDiscovered = { peer ->
-            peerManager.onPeerDataReceived(peer.id)
-            Log.i(TAG, "Peer connected: ${peer.id}")
+
+        // Wire BLE audio receive → spatial → playback
+        ble.onAudioReceived = { opusFrame ->
+            val decoded = opusCodec.decode(opusFrame)
+            if (decoded != null) {
+                val spatialProcessed = spatialEngine.processSpatial("ble_peer", decoded)
+                val filtered = clickFilter.process(spatialProcessed)
+                audioMixer.submitFrame("ble_peer", filtered)
+                val mixed = audioMixer.mix(filtered.size)
+                if (mixed != null) {
+                    playbackEngine.play(mixed)
+                }
+            }
         }
-        transport.onPeerLost = { peerId ->
-            peerManager.onPeerLost(peerId)
-            audioMixer.removePeer(peerId)
-            spatialEngine.removePeer(peerId)
+
+        // Wire BLE status updates
+        ble.onStatusUpdate = { json ->
+            Log.d(TAG, "Phone status: $json")
+            // Extract peer count from phone's mesh status
+            val meshPeers = json.optInt("mesh_peers", -1)
+            if (meshPeers >= 0) {
+                onPeerCountChanged?.invoke(meshPeers + 1) // +1 for self
+            }
+        }
+
+        // Wire BLE control messages (from phone)
+        ble.onControlReceived = { json ->
+            val cmd = json.optString("cmd", "")
+            Log.d(TAG, "Phone control: $json")
+            when (cmd) {
+                "spatial" -> {
+                    val peerId = json.optString("from", "ble_peer")
+                    val peerYaw = json.optDouble("yaw", 0.0).toFloat()
+                    val rssi = json.optInt("rssi", DEFAULT_PEER_RSSI)
+                    spatialEngine.updatePeerSpatial(peerId, rssi, peerYaw)
+                    spatialEngine.updatePeerSpatial("ble_peer", rssi, peerYaw)
+
+                    val direction = spatialEngine.getPeerDirection(peerId)
+                    val distance = spatialEngine.getPeerDistance(peerId)
+                    if (direction != null && distance != null) {
+                        onPeerDirectionChanged?.invoke(direction, distance)
+                    }
+                }
+            }
+        }
+
+        ble.onConnected = {
+            Log.i(TAG, "BLE connected to phone companion")
+        }
+
+        ble.onDisconnected = {
+            Log.w(TAG, "BLE disconnected from phone companion")
         }
 
         // Playback feeds AEC reference
@@ -162,9 +218,9 @@ class MeshTalkService : Service() {
         headTracker.start()
         peerManager.start(scope)
 
-        // Use NanSupervisor to start transport — handles auto-enable, attach, reconnect
-        channelManager.joinChannel(0) // sets currentChannel
-        nanSupervisor.start(channelManager.currentChannel.serviceName)
+        // Start BLE client — scans and connects to phone
+        channelManager.joinChannel(0)
+        ble.start()
 
         // Start capture pipeline
         pipelineJob = scope.launch {
@@ -173,10 +229,9 @@ class MeshTalkService : Service() {
             }
         }
 
-        // Start audio stream client (runs independently of VOX state)
+        // Start audio stream client (secondary path — Mac Mini relay, runs independently)
         audioStreamClient = AudioStreamClient(this, captureEngine.audioFrames, deviceId).also {
             it.onAudioReceived = { pcmShorts ->
-                // Apply spatial processing → click filter → playback
                 val spatialProcessed = spatialEngine.processSpatial("server_peer", pcmShorts)
                 val filtered = clickFilter.process(spatialProcessed)
                 playbackEngine.play(filtered)
@@ -200,12 +255,11 @@ class MeshTalkService : Service() {
         }
 
         isActive = true
-        Log.i(TAG, "Pipeline initialized with spatial audio, device=$deviceId")
+        Log.i(TAG, "Pipeline initialized with BLE transport + spatial audio, device=$deviceId")
     }
 
     /**
      * Send head orientation to server every SPATIAL_SEND_INTERVAL_MS.
-     * The server relays it to other glasses.
      */
     private fun startSpatialSender() {
         spatialSendJob?.cancel()
@@ -228,8 +282,7 @@ class MeshTalkService : Service() {
     }
 
     /**
-     * Handle incoming text (JSON) messages from the server.
-     * These are spatial updates from other glasses, relayed by the server.
+     * Handle incoming text (JSON) messages from the server (secondary relay path).
      */
     private fun handleServerTextMessage(text: String) {
         try {
@@ -238,15 +291,9 @@ class MeshTalkService : Service() {
                 "spatial" -> {
                     val peerId = json.optString("from", "unknown")
                     val peerYaw = json.optDouble("yaw", 0.0).toFloat()
-
-                    // Update spatial engine with peer's orientation
-                    // Use default RSSI since both glasses are on same WiFi network
                     spatialEngine.updatePeerSpatial(peerId, DEFAULT_PEER_RSSI, peerYaw)
-
-                    // Also update the "server_peer" alias used by AudioStreamClient
                     spatialEngine.updatePeerSpatial("server_peer", DEFAULT_PEER_RSSI, peerYaw)
 
-                    // Notify HUD about peer direction/distance
                     val direction = spatialEngine.getPeerDirection(peerId)
                     val distance = spatialEngine.getPeerDistance(peerId)
                     if (direction != null && distance != null) {
@@ -276,51 +323,11 @@ class MeshTalkService : Service() {
             voxStateMachine.onVadResult(vadResult, 32) // 32ms per VAD window
         }
 
-        // 4. If speaking, encode and send
+        // 4. If speaking, encode and send via BLE to phone
         if (voxStateMachine.shouldTransmit) {
-            // Accumulate to 320 samples (20ms) for Opus
-            // For simplicity, send every AEC frame through Opus
-            // (Opus handles variable input sizes internally)
             val encoded = opusCodec.encode(aecFrame, aecFrame.size) ?: return
-            val packet = PacketCodec.encodeAudio(
-                channelManager.currentChannel.id, seq++, encoded
-            )
-            transport.sendToAll(packet)
-        }
-    }
-
-    private fun handleIncomingPacket(peerId: String, data: ByteArray) {
-        val packet = PacketCodec.decode(data) ?: return
-        when (packet.type) {
-            PacketCodec.TYPE_AUDIO -> {
-                val decoded = opusCodec.decode(packet.payload) ?: return
-                // Apply spatial audio processing before mixing
-                val spatialProcessed = spatialEngine.processSpatial(peerId, decoded)
-                val filtered = clickFilter.process(spatialProcessed)
-                audioMixer.submitFrame(peerId, filtered)
-                val mixed = audioMixer.mix(filtered.size) ?: return
-                playbackEngine.play(mixed)
-            }
-            PacketCodec.TYPE_CONTROL -> {
-                // Handle control messages (announce, mute, etc.)
-                val controlJson = String(packet.payload)
-                Log.d(TAG, "Control from $peerId: $controlJson")
-
-                // Try to parse spatial data from control messages too
-                try {
-                    val json = JSONObject(controlJson)
-                    if (json.has("yaw")) {
-                        val peerYaw = json.optDouble("yaw", 0.0).toFloat()
-                        val rssi = json.optInt("rssi", DEFAULT_PEER_RSSI)
-                        spatialEngine.updatePeerSpatial(peerId, rssi, peerYaw)
-                    }
-                } catch (_: Exception) {}
-            }
-            PacketCodec.TYPE_PING -> {
-                val pong = PacketCodec.encodePong(packet.channelId, packet.seq)
-                transport.sendTo(peerId, pong)
-            }
-            PacketCodec.TYPE_PONG -> { /* keepalive acknowledged */ }
+            // Send via BLE to phone (primary path)
+            blePhoneClient?.sendAudio(encoded, isSpeech = true)
         }
     }
 
@@ -337,14 +344,15 @@ class MeshTalkService : Service() {
     fun toggleMute(): Boolean {
         isMuted = !isMuted
         voxStateMachine.muted = isMuted
+        // Notify phone companion
+        blePhoneClient?.sendMuteState(isMuted)
         return isMuted
     }
 
     fun switchChannel() {
         audioMixer.clear()
         channelManager.switchChannel()
-        // Restart supervisor with the new channel name
-        nanSupervisor.switchChannel(channelManager.currentChannel.serviceName)
+        // Phone companion is notified via channelManager.onChannelChanged callback
     }
 
     fun stopPipeline() {
@@ -352,11 +360,11 @@ class MeshTalkService : Service() {
         spatialSendJob?.cancel()
         audioStreamClient?.stop()
         audioStreamClient = null
+        blePhoneClient?.stop()
+        blePhoneClient = null
         captureEngine.stop()
         playbackEngine.stop()
         headTracker.stop()
-        nanSupervisor.stop()  // Stop supervisor (cleans up transport, receivers, watchdog)
-        channelManager.leaveChannel()
         peerManager.stop()
         opusCodec.release()
         speexAec.release()
@@ -388,7 +396,7 @@ class MeshTalkService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("MeshTalk")
-            .setContentText("Walkie-talkie active — spatial audio")
+            .setContentText("Walkie-talkie active — BLE + spatial audio")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pending)
             .setOngoing(true)
