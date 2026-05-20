@@ -27,6 +27,7 @@ class TransportManager(
     var supervisor: NanSupervisor? = null
 
     // Transports in priority order
+    private val hotspotTransport = HotspotTransport(context, deviceId)
     private val wifiDirectTransport = WifiDirectTransport(context, deviceId)
     private val wifiLanTransport = WifiLanTransport(context, deviceId)
     private val btRfcommTransport = BluetoothRfcommTransport(context, deviceId)
@@ -41,17 +42,31 @@ class TransportManager(
     override var onDataReceived: ((String, ByteArray) -> Unit)? = null
 
     override fun start(channelName: String) {
-        Log.i(TAG, "Starting transports (WiFi LAN + BT RFCOMM)...")
+        Log.i(TAG, "Starting transports (Hotspot + WiFi LAN + BT RFCOMM)...")
 
-        // WiFi Direct disabled — Mercury OS kills the app when P2P APIs are called
-        // wireTransport("WiFiDirect", wifiDirectTransport, priority = 1)
+        // Wire all transports
+        wireTransport("Hotspot", hotspotTransport, priority = 1)
         wireTransport("WiFiLAN", wifiLanTransport, priority = 2)
         wireTransport("BT_RFCOMM", btRfcommTransport, priority = 3)
 
-        // wifiDirectTransport.start(channelName)  // disabled
+        // Start WiFi LAN first (works if on shared WiFi)
         wifiLanTransport.start(channelName)
         btRfcommTransport.start(channelName)
+
+        // Start hotspot transport after a delay — only if WiFi LAN hasn't connected
+        // This avoids creating a hotspot when already on shared WiFi
+        scope.launch {
+            delay(15000) // Give WiFi LAN 15s to connect
+            if (isRunning && activeTransportName == "none") {
+                Log.i(TAG, "No WiFi LAN connection after 15s — starting hotspot transport")
+                hotspotTransport.start(channelName)
+            } else if (activeTransportName != "none") {
+                Log.i(TAG, "Already connected via $activeTransportName — hotspot not needed")
+            }
+        }
     }
+
+    private var isRunning = true
 
     private fun wireTransport(name: String, transport: MeshTransport, priority: Int) {
         transport.onPeerDiscovered = { peer ->
@@ -109,6 +124,8 @@ class TransportManager(
     }
 
     override fun stop() {
+        isRunning = false
+        hotspotTransport.stop()
         wifiDirectTransport.stop()
         wifiLanTransport.stop()
         btRfcommTransport.stop()

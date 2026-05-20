@@ -305,12 +305,31 @@ class WifiLanTransport(
                     val senderAddr = packet.address
                     val peerId = connectedPeers.entries
                         .firstOrNull { it.value.address.hostAddress == senderAddr.hostAddress }
-                        ?.key ?: "unknown"
+                        ?.key
+                    // If sender is unknown, try to match by known peer IDs
+                    // and update their IP (handles NAN discovery with 0.0.0.0 IP)
+                    val resolvedPeerId = if (peerId != null) {
+                        peerId
+                    } else {
+                        // Unknown sender — check if any peer has 0.0.0.0 IP
+                        val zeroPeer = connectedPeers.entries.firstOrNull {
+                            it.value.address.hostAddress == "0.0.0.0"
+                        }
+                        if (zeroPeer != null) {
+                            // Update this peer's IP with the actual sender address
+                            val updated = MeshPeer(zeroPeer.key, senderAddr, audioPort)
+                            connectedPeers[zeroPeer.key] = updated
+                            Log.i(TAG, "Learned real IP for peer ${zeroPeer.key}: ${senderAddr.hostAddress}")
+                            zeroPeer.key
+                        } else {
+                            "unknown"
+                        }
+                    }
                     recvCount++
                     if (recvCount % 500 == 0L) {
-                        Log.d(TAG, "UDP recv #$recvCount (${data.size}B from $peerId)")
+                        Log.d(TAG, "UDP recv #$recvCount (${data.size}B from $resolvedPeerId)")
                     }
-                    onDataReceived?.invoke(peerId, data)
+                    onDataReceived?.invoke(resolvedPeerId, data)
                 } catch (e: Exception) {
                     if (isActive) Log.e(TAG, "UDP receive error: ${e.message}")
                 }
