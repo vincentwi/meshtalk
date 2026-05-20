@@ -49,6 +49,12 @@
             android:name="com.rayneo.mercury.app"
             android:value="true" />
 
+        <!-- NO LAUNCHER category — keeps MeshTalk OUT of the RayNeo carousel.
+             The Mercury launcher has a firmware bug (ViewExtension.kt:427) where
+             fast carousel scrolling crashes with Bitmap.createBitmap(0,0) because
+             icon views haven't measured yet. Each carousel entry increases crash
+             odds. MeshTalk auto-starts via BootReceiver/foreground service anyway.
+             Launch manually: adb shell am start -n com.openclaw.app/.MeshTalkActivity -->
         <activity
             android:name=".MeshTalkActivity"
             android:exported="true"
@@ -56,7 +62,7 @@
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
@@ -73,6 +79,12 @@
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+    <activity
+            android:name=".BtPairActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:excludeFromRecents="true" />
 
     </application>
 
