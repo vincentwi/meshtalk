@@ -150,16 +150,17 @@ class WifiAwareTransport(
     private fun requestNetwork(session: DiscoverySession, peerHandle: PeerHandle, peerId: String) {
         if (connectedPeers.containsKey(peerId)) return
 
-        val specifier = WifiAwareNetworkSpecifier.Builder(session, peerHandle)
-            .setPskPassphrase(PSK)
-            .build()
+        try {
+            val specifier = WifiAwareNetworkSpecifier.Builder(session, peerHandle)
+                .setPskPassphrase(PSK)
+                .build()
 
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI_AWARE)
-            .setNetworkSpecifier(specifier)
-            .build()
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI_AWARE)
+                .setNetworkSpecifier(specifier)
+                .build()
 
-        connectivityManager.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
+            connectivityManager.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 val peerInfo = caps.transportInfo as? WifiAwareNetworkInfo ?: return
                 val peerAddr = peerInfo.peerIpv6Addr ?: return
@@ -179,7 +180,14 @@ class WifiAwareTransport(
                 }
                 supervisor?.onTransportNetworkLost()
             }
-        }, handler)
+            }, handler)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException in requestNetwork: ${e.message}")
+            supervisor?.onTransportFailed("requestNetwork: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "requestNetwork failed: ${e.message}")
+            supervisor?.onTransportFailed("requestNetwork: ${e.message}")
+        }
     }
 
     private fun startUdpReceiver() {
