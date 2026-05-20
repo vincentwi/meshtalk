@@ -1,0 +1,404 @@
+package com.openclaw.app.service
+
+import android.app.*
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.*
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import com.openclaw.app.MeshTalkActivity
+import com.openclaw.app.audio.*
+import com.openclaw.app.mesh.*
+import com.openclaw.app.vox.VoxStateMachine
+import com.openclaw.app.vox.VoxState
+import com.openclaw.app.mesh.NanSupervisor
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collectLatest
+import org.json.JSONObject
+
+class MeshTalkService : Service() {
+    companion object {
+        private const val TAG = "MeshTalkService"
+        private const val NOTIFICATION_ID = 1001
+        private const val CHANNEL_ID = "meshtalk_service"
+        private const val SPATIAL_SEND_INTERVAL_MS = 200L
+        private const val DEFAULT_PEER_RSSI = -55  // Approximate RSSI for same-network peers
+    }
+
+    // Audio pipeline
+    lateinit var captureEngine: AudioCaptureEngine
+    lateinit var playbackEngine: AudioPlaybackEngine
+    lateinit var opusCodec: OpusCodec
+    lateinit var speexAec: SpeexAec
+    lateinit var vadEngine: VadEngine
+    lateinit var voxStateMachine: VoxStateMachine
+    lateinit var clickFilter: ClickRemovalFilter
+    lateinit var audioMixer: AudioMixer
+
+    // Spatial audio
+    lateinit var headTracker: HeadTracker
+    lateinit var spatialEngine: SpatialAudioEngine
+
+    // Audio streaming to server
+    private var audioStreamClient: AudioStreamClient? = null
+
+    // Mesh
+    lateinit var transport: MeshTransport
+    lateinit var nanSupervisor: NanSupervisor
+    lateinit var peerManager: PeerManager
+    lateinit var channelManager: ChannelManager
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var pipelineJob: Job? = null
+    private var spatialSendJob: Job? = null
+    private var seq = 0
+    var isActive = false
+        private set
+    var isMuted = false
+        private set
+
+    var onVoxStateChanged: ((VoxState) -> Unit)? = null
+    var onPeerCountChanged: ((Int) -> Unit)? = null
+    var onChannelChanged: ((String) -> Unit)? = null
+    var onPeerDirectionChanged: ((Float, Float) -> Unit)? = null  // angle, distance
+    var onRadioStateChanged: ((String) -> Unit)? = null
+
+    private val binder = LocalBinder()
+    inner class LocalBinder : Binder() {
+        fun getService(): MeshTalkService = this@MeshTalkService
+    }
+    override fun onBind(intent: Intent?) = binder
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        createNotificationChannel()
+        ServiceCompat.startForeground(
+            this, NOTIFICATION_ID, createNotification(),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        )
+        acquireWakeLock()
+
+        if (!isActive) {
+            initPipeline()
+        }
+
+        return START_STICKY
+    }
+
+    private fun initPipeline() {
+        // Use ANDROID_ID as unique device identifier (Build.SERIAL is "unknown" on modern Android)
+        val androidId = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+        val deviceId = androidId?.takeLast(6) ?: "glass_${System.currentTimeMillis() % 100000}"
+
+        // Audio components
+        captureEngine = AudioCaptureEngine()
+        playbackEngine = AudioPlaybackEngine()
+        opusCodec = OpusCodec()
+        speexAec = SpeexAec()
+        vadEngine = VadEngine(this)
+        voxStateMachine = VoxStateMachine()
+        clickFilter = ClickRemovalFilter()
+        audioMixer = AudioMixer()
+
+        // Spatial audio components
+        headTracker = HeadTracker(this)
+        spatialEngine = SpatialAudioEngine()
+
+        // Mesh components — NanSupervisor wraps WifiAwareTransport for self-healing
+        val wifiTransport = WifiAwareTransport(this, deviceId)
+        transport = wifiTransport
+        nanSupervisor = NanSupervisor(this, wifiTransport)
+        peerManager = PeerManager(transport)
+        peerManager.deviceId = deviceId
+        channelManager = ChannelManager(transport, peerManager)
+
+        // Wire radio state changes to HUD
+        nanSupervisor.onStateChanged = { state ->
+            val stateName = state.name
+            Log.i(TAG, "Radio state: $stateName")
+            onRadioStateChanged?.invoke(stateName)
+        }
+
+        // Init native libs
+        opusCodec.init()
+        speexAec.init()
+
+        // Callbacks
+        voxStateMachine.onStateChanged = { state ->
+            onVoxStateChanged?.invoke(state)
+        }
+        peerManager.onPeerCountChanged = { count ->
+            onPeerCountChanged?.invoke(count)
+        }
+        channelManager.onChannelChanged = { channel ->
+            onChannelChanged?.invoke(channel.displayName)
+        }
+
+        // Mesh data handler
+        transport.onDataReceived = { peerId, data ->
+            peerManager.onPeerDataReceived(peerId)
+            handleIncomingPacket(peerId, data)
+        }
+        transport.onPeerDiscovered = { peer ->
+            peerManager.onPeerDataReceived(peer.id)
+            Log.i(TAG, "Peer connected: ${peer.id}")
+        }
+        transport.onPeerLost = { peerId ->
+            peerManager.onPeerLost(peerId)
+            audioMixer.removePeer(peerId)
+            spatialEngine.removePeer(peerId)
+        }
+
+        // Playback feeds AEC reference
+        playbackEngine.onFramePlayed = { frame ->
+            speexAec.feedReference(frame)
+        }
+
+        // Start everything
+        captureEngine.start()
+        playbackEngine.start()
+        headTracker.start()
+        peerManager.start(scope)
+
+        // Use NanSupervisor to start transport — handles auto-enable, attach, reconnect
+        channelManager.joinChannel(0) // sets currentChannel
+        nanSupervisor.start(channelManager.currentChannel.serviceName)
+
+        // Start capture pipeline
+        pipelineJob = scope.launch {
+            captureEngine.audioFrames.collectLatest { micFrame ->
+                processCaptureFrame(micFrame)
+            }
+        }
+
+        // Start audio stream client (runs independently of VOX state)
+        audioStreamClient = AudioStreamClient(this, captureEngine.audioFrames, deviceId).also {
+            it.onAudioReceived = { pcmShorts ->
+                // Apply spatial processing → click filter → playback
+                val spatialProcessed = spatialEngine.processSpatial("server_peer", pcmShorts)
+                val filtered = clickFilter.process(spatialProcessed)
+                playbackEngine.play(filtered)
+            }
+            it.onTextMessageReceived = { text ->
+                handleServerTextMessage(text)
+            }
+            it.start()
+        }
+        Log.i(TAG, "Audio stream client started (bidirectional relay via server)")
+
+        // Start periodic spatial data sender (every 200ms)
+        startSpatialSender()
+
+        // Feed head tracker orientation to spatial engine
+        scope.launch {
+            headTracker.orientationFlow.collect { orientation ->
+                spatialEngine.listenerYaw = orientation.yaw
+                spatialEngine.listenerPitch = orientation.pitch
+            }
+        }
+
+        isActive = true
+        Log.i(TAG, "Pipeline initialized with spatial audio, device=$deviceId")
+    }
+
+    /**
+     * Send head orientation to server every SPATIAL_SEND_INTERVAL_MS.
+     * The server relays it to other glasses.
+     */
+    private fun startSpatialSender() {
+        spatialSendJob?.cancel()
+        spatialSendJob = scope.launch {
+            while (isActive) {
+                try {
+                    val msg = JSONObject().apply {
+                        put("type", "spatial")
+                        put("yaw", headTracker.headYaw)
+                        put("pitch", headTracker.headPitch)
+                        put("roll", headTracker.headRoll)
+                    }
+                    audioStreamClient?.sendText(msg.toString())
+                } catch (e: Exception) {
+                    Log.w(TAG, "Spatial send error: ${e.message}")
+                }
+                delay(SPATIAL_SEND_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * Handle incoming text (JSON) messages from the server.
+     * These are spatial updates from other glasses, relayed by the server.
+     */
+    private fun handleServerTextMessage(text: String) {
+        try {
+            val json = JSONObject(text)
+            when (json.optString("type")) {
+                "spatial" -> {
+                    val peerId = json.optString("from", "unknown")
+                    val peerYaw = json.optDouble("yaw", 0.0).toFloat()
+
+                    // Update spatial engine with peer's orientation
+                    // Use default RSSI since both glasses are on same WiFi network
+                    spatialEngine.updatePeerSpatial(peerId, DEFAULT_PEER_RSSI, peerYaw)
+
+                    // Also update the "server_peer" alias used by AudioStreamClient
+                    spatialEngine.updatePeerSpatial("server_peer", DEFAULT_PEER_RSSI, peerYaw)
+
+                    // Notify HUD about peer direction/distance
+                    val direction = spatialEngine.getPeerDirection(peerId)
+                    val distance = spatialEngine.getPeerDistance(peerId)
+                    if (direction != null && distance != null) {
+                        onPeerDirectionChanged?.invoke(direction, distance)
+                    }
+                }
+                "control" -> {
+                    val from = json.optString("from", "unknown")
+                    Log.d(TAG, "Control message from $from: $text")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse server text message: ${e.message}")
+        }
+    }
+
+    private fun processCaptureFrame(micFrame: ShortArray) {
+        // 1. AEC
+        val aecFrame = speexAec.process(micFrame)
+
+        // 2. VAD (accumulates 160→512)
+        val vadResult = vadEngine.feedFrame(aecFrame)
+
+        // 3. VOX state machine
+        if (vadResult != null) {
+            voxStateMachine.muted = isMuted
+            voxStateMachine.onVadResult(vadResult, 32) // 32ms per VAD window
+        }
+
+        // 4. If speaking, encode and send
+        if (voxStateMachine.shouldTransmit) {
+            // Accumulate to 320 samples (20ms) for Opus
+            // For simplicity, send every AEC frame through Opus
+            // (Opus handles variable input sizes internally)
+            val encoded = opusCodec.encode(aecFrame, aecFrame.size) ?: return
+            val packet = PacketCodec.encodeAudio(
+                channelManager.currentChannel.id, seq++, encoded
+            )
+            transport.sendToAll(packet)
+        }
+    }
+
+    private fun handleIncomingPacket(peerId: String, data: ByteArray) {
+        val packet = PacketCodec.decode(data) ?: return
+        when (packet.type) {
+            PacketCodec.TYPE_AUDIO -> {
+                val decoded = opusCodec.decode(packet.payload) ?: return
+                // Apply spatial audio processing before mixing
+                val spatialProcessed = spatialEngine.processSpatial(peerId, decoded)
+                val filtered = clickFilter.process(spatialProcessed)
+                audioMixer.submitFrame(peerId, filtered)
+                val mixed = audioMixer.mix(filtered.size) ?: return
+                playbackEngine.play(mixed)
+            }
+            PacketCodec.TYPE_CONTROL -> {
+                // Handle control messages (announce, mute, etc.)
+                val controlJson = String(packet.payload)
+                Log.d(TAG, "Control from $peerId: $controlJson")
+
+                // Try to parse spatial data from control messages too
+                try {
+                    val json = JSONObject(controlJson)
+                    if (json.has("yaw")) {
+                        val peerYaw = json.optDouble("yaw", 0.0).toFloat()
+                        val rssi = json.optInt("rssi", DEFAULT_PEER_RSSI)
+                        spatialEngine.updatePeerSpatial(peerId, rssi, peerYaw)
+                    }
+                } catch (_: Exception) {}
+            }
+            PacketCodec.TYPE_PING -> {
+                val pong = PacketCodec.encodePong(packet.channelId, packet.seq)
+                transport.sendTo(peerId, pong)
+            }
+            PacketCodec.TYPE_PONG -> { /* keepalive acknowledged */ }
+        }
+    }
+
+    fun toggleActive(): Boolean {
+        isActive = !isActive
+        if (isActive) {
+            initPipeline()
+        } else {
+            stopPipeline()
+        }
+        return isActive
+    }
+
+    fun toggleMute(): Boolean {
+        isMuted = !isMuted
+        voxStateMachine.muted = isMuted
+        return isMuted
+    }
+
+    fun switchChannel() {
+        audioMixer.clear()
+        channelManager.switchChannel()
+        // Restart supervisor with the new channel name
+        nanSupervisor.switchChannel(channelManager.currentChannel.serviceName)
+    }
+
+    fun stopPipeline() {
+        pipelineJob?.cancel()
+        spatialSendJob?.cancel()
+        audioStreamClient?.stop()
+        audioStreamClient = null
+        captureEngine.stop()
+        playbackEngine.stop()
+        headTracker.stop()
+        nanSupervisor.stop()  // Stop supervisor (cleans up transport, receivers, watchdog)
+        channelManager.leaveChannel()
+        peerManager.stop()
+        opusCodec.release()
+        speexAec.release()
+        vadEngine.release()
+        audioMixer.clear()
+        Log.i(TAG, "Pipeline stopped")
+    }
+
+    private fun acquireWakeLock() {
+        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).run {
+            newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MeshTalk::ServiceLock")
+                .apply { acquire(10 * 60 * 1000L) }
+        }
+    }
+
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID, "MeshTalk Service",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply { description = "MeshTalk walkie-talkie active" }
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(channel)
+    }
+
+    private fun createNotification(): Notification {
+        val intent = Intent(this, MeshTalkActivity::class.java)
+        val pending = PendingIntent.getActivity(
+            this, 0, intent, PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("MeshTalk")
+            .setContentText("Walkie-talkie active — spatial audio")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentIntent(pending)
+            .setOngoing(true)
+            .build()
+    }
+
+    override fun onDestroy() {
+        stopPipeline()
+        wakeLock?.release()
+        scope.cancel()
+        super.onDestroy()
+    }
+}

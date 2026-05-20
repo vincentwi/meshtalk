@@ -4,7 +4,7 @@
 # Runs forever, checks every 3 seconds, relaunches if killed
 
 ADB=/opt/homebrew/bin/adb
-PKG=com.meshtalk.app
+PKG=com.openclaw.app
 
 echo "MeshTalk Watchdog — monitoring both glasses"
 echo "Press Ctrl+C to stop"

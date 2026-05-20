@@ -31,7 +31,7 @@ extern "C" {
  * Returns 0 on success, negative Opus error code on failure.
  */
 JNIEXPORT jint JNICALL
-Java_com_meshtalk_app_audio_OpusCodec_nativeInit(
+Java_com_openclaw_app_audio_OpusCodec_nativeInit(
         JNIEnv *env, jobject /* this */,
         jint sampleRate, jint channels) {
 
@@ -76,7 +76,7 @@ Java_com_meshtalk_app_audio_OpusCodec_nativeInit(
  * Returns a byte[] with the compressed data, or null on error.
  */
 JNIEXPORT jbyteArray JNICALL
-Java_com_meshtalk_app_audio_OpusCodec_nativeEncode(
+Java_com_openclaw_app_audio_OpusCodec_nativeEncode(
         JNIEnv *env, jobject /* this */,
         jshortArray pcmData, jint frameSize) {
 
@@ -111,7 +111,7 @@ Java_com_meshtalk_app_audio_OpusCodec_nativeEncode(
  * Returns a short[] with the decoded audio, or null on error.
  */
 JNIEXPORT jshortArray JNICALL
-Java_com_meshtalk_app_audio_OpusCodec_nativeDecode(
+Java_com_openclaw_app_audio_OpusCodec_nativeDecode(
         JNIEnv *env, jobject /* this */,
         jbyteArray opusData, jint frameSize) {
 
@@ -159,7 +159,7 @@ Java_com_meshtalk_app_audio_OpusCodec_nativeDecode(
  * Release encoder and decoder resources.
  */
 JNIEXPORT void JNICALL
-Java_com_meshtalk_app_audio_OpusCodec_nativeRelease(
+Java_com_openclaw_app_audio_OpusCodec_nativeRelease(
         JNIEnv *env, jobject /* this */) {
 
     if (encoder) {

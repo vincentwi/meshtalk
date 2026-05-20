@@ -30,7 +30,7 @@ extern "C" {
  * Returns 0 on success, -1 on failure.
  */
 JNIEXPORT jint JNICALL
-Java_com_meshtalk_app_audio_SpeexAec_nativeInit(
+Java_com_openclaw_app_audio_SpeexAec_nativeInit(
         JNIEnv *env, jobject /* this */,
         jint frameSize, jint filterLength, jint sampleRate) {
 
@@ -87,7 +87,7 @@ Java_com_meshtalk_app_audio_SpeexAec_nativeInit(
  * Returns a short[] with the cleaned audio, or null on error.
  */
 JNIEXPORT jshortArray JNICALL
-Java_com_meshtalk_app_audio_SpeexAec_nativeProcess(
+Java_com_openclaw_app_audio_SpeexAec_nativeProcess(
         JNIEnv *env, jobject /* this */,
         jshortArray micData, jshortArray speakerData) {
 
@@ -130,7 +130,7 @@ Java_com_meshtalk_app_audio_SpeexAec_nativeProcess(
  * Release all Speex AEC resources.
  */
 JNIEXPORT void JNICALL
-Java_com_meshtalk_app_audio_SpeexAec_nativeRelease(
+Java_com_openclaw_app_audio_SpeexAec_nativeRelease(
         JNIEnv *env, jobject /* this */) {
 
     if (preprocessState) {
