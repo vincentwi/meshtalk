@@ -32,6 +32,7 @@ class VadEngine(context: Context) {
      * when enough samples accumulated (512), or null if still accumulating.
      */
     fun feedFrame(aecFrame: ShortArray): Float? {
+        if (closed) return null
         val toCopy = minOf(aecFrame.size, VAD_FRAME_SIZE - accumulatedSamples)
         System.arraycopy(aecFrame, 0, accumulator, accumulatedSamples, toCopy)
         accumulatedSamples += toCopy
@@ -55,5 +56,12 @@ class VadEngine(context: Context) {
         return buf.array()
     }
 
-    fun release() { vad.close() }
+    private var closed = false
+
+    fun release() {
+        if (!closed) {
+            closed = true
+            try { vad.close() } catch (_: Exception) {}
+        }
+    }
 }
