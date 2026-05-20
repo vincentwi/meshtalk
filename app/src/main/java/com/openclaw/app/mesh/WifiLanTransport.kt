@@ -58,30 +58,93 @@ class WifiLanTransport(
         // Start UDP listener first
         startUdpReceiver()
 
-        // Then start NAN discovery to find peers and exchange IPs
+        // Start broadcast-based peer discovery (fallback when NAN unavailable)
+        startBroadcastDiscovery()
+
+        // Also try NAN discovery (higher quality when available)
         val wifiAwareManager = context.getSystemService(WifiAwareManager::class.java)
-        if (wifiAwareManager == null || !wifiAwareManager.isAvailable) {
-            Log.e(TAG, "WiFi Aware not available — cannot discover peers")
-            supervisor?.onTransportFailed("WiFi Aware not available")
+        if (wifiAwareManager != null && wifiAwareManager.isAvailable) {
+            val myIp = getWifiIp()
+            Log.i(TAG, "Starting NAN discovery (deviceId=$deviceId, myIP=$myIp)")
+            wifiAwareManager.attach(object : AttachCallback() {
+                override fun onAttached(session: WifiAwareSession) {
+                    Log.i(TAG, "WiFi Aware attached")
+                    awareSession = session
+                    supervisor?.onTransportAttached()
+                    publish(channelName)
+                    subscribe(channelName)
+                }
+                override fun onAttachFailed() {
+                    Log.w(TAG, "WiFi Aware attach failed — using broadcast discovery only")
+                }
+            }, handler)
+        } else {
+            Log.i(TAG, "WiFi Aware not available — using broadcast discovery only")
+        }
+    }
+
+    // ── UDP Broadcast Discovery (works without NAN) ────────────
+
+    private var broadcastJob: Job? = null
+
+    private fun startBroadcastDiscovery() {
+        val myIp = getWifiIp()
+        if (myIp == "0.0.0.0") {
+            Log.w(TAG, "No WiFi IP — broadcast discovery disabled")
             return
         }
 
-        val myIp = getWifiIp()
-        Log.i(TAG, "Starting: deviceId=$deviceId, myIP=$myIp, port=$audioPort")
+        Log.i(TAG, "Starting broadcast discovery (deviceId=$deviceId, myIP=$myIp, port=$audioPort)")
 
-        wifiAwareManager.attach(object : AttachCallback() {
-            override fun onAttached(session: WifiAwareSession) {
-                Log.i(TAG, "WiFi Aware attached")
-                awareSession = session
-                supervisor?.onTransportAttached()
-                publish(channelName)
-                subscribe(channelName)
+        // Send periodic discovery beacons
+        broadcastJob = scope.launch {
+            val beacon = "MESHTALK_BEACON|$deviceId|$myIp|$audioPort".toByteArray(Charsets.UTF_8)
+            val broadcastAddr = InetAddress.getByName("255.255.255.255")
+
+            while (isActive) {
+                try {
+                    val socket = DatagramSocket()
+                    socket.broadcast = true
+                    val packet = DatagramPacket(beacon, beacon.size, broadcastAddr, audioPort + 1) // beacon port = audio + 1
+                    socket.send(packet)
+                    socket.close()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Beacon send failed: ${e.message}")
+                }
+                delay(3000) // beacon every 3s
             }
-            override fun onAttachFailed() {
-                Log.e(TAG, "WiFi Aware attach failed")
-                supervisor?.onTransportAttachFailed()
+        }
+
+        // Listen for beacons from other devices
+        scope.launch {
+            try {
+                val beaconSocket = DatagramSocket(audioPort + 1)
+                beaconSocket.broadcast = true
+                beaconSocket.soTimeout = 0
+                val buf = ByteArray(256)
+
+                Log.i(TAG, "Beacon listener on port ${audioPort + 1}")
+                while (isActive) {
+                    val packet = DatagramPacket(buf, buf.size)
+                    beaconSocket.receive(packet)
+                    val text = String(buf, 0, packet.length, Charsets.UTF_8)
+                    if (text.startsWith("MESHTALK_BEACON|")) {
+                        val parts = text.split("|")
+                        if (parts.size >= 4) {
+                            val peerId = parts[1]
+                            val peerIp = parts[2]
+                            val peerPort = parts[3].toIntOrNull() ?: audioPort
+                            if (peerId != deviceId) {
+                                registerPeer(peerId, peerIp)
+                            }
+                        }
+                    }
+                }
+                beaconSocket.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Beacon listener error: ${e.message}")
             }
-        }, handler)
+        }
     }
 
     /**
@@ -306,6 +369,7 @@ class WifiLanTransport(
     }
 
     override fun stop() {
+        broadcastJob?.cancel()
         receiveJob?.cancel()
         try { udpSocket?.close() } catch (_: Exception) {}
         udpSocket = null

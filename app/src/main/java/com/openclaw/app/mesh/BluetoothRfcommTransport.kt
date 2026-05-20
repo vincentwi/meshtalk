@@ -77,17 +77,16 @@ class BluetoothRfcommTransport(
         isRunning = true
         Log.i(TAG, "Starting BT RFCOMM transport (deviceId=$deviceId)")
 
-        // Register pairing receiver to auto-accept pairing requests
-        registerPairingReceiver()
-
         // Start server (listen for incoming connections)
         startServer()
 
-        // Scan for unpaired RayNeo glasses and pair them
-        scanAndPairNearbyGlasses()
-
-        // Start client (connect to paired devices)
+        // If already paired with RayNeo glasses, try connecting immediately
         startClient()
+
+        // Note: BT auto-pairing/discovery removed — Mercury OS kills the app
+        // when setScanMode or startDiscovery is called. Pairing must be done
+        // manually via ADB: adb shell am start -a android.settings.BLUETOOTH_SETTINGS
+        // Once paired, RFCOMM auto-connects on every app launch.
     }
 
     // ── Auto-pairing: scan for nearby ARGF20 devices and pair ──────
@@ -156,8 +155,25 @@ class BluetoothRfcommTransport(
             } ?: emptyList()
 
             if (paired.isNotEmpty()) {
-                Log.i(TAG, "Already paired with ${paired.size} RayNeo device(s)")
+                Log.i(TAG, "Already paired with ${paired.size} RayNeo device(s): ${paired.map { it.name }}")
                 return@launch
+            }
+
+            // Make ourselves discoverable via reflection (no UI prompt)
+            try {
+                val method = adapter.javaClass.getMethod("setScanMode", Int::class.java, Int::class.java)
+                method.invoke(adapter, BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE, 120)
+                Log.i(TAG, "Set BT discoverable mode (120s)")
+            } catch (e: Exception) {
+                Log.w(TAG, "setScanMode(2-arg) failed: ${e.message}")
+                try {
+                    val method = adapter.javaClass.getMethod("setScanMode", Int::class.java)
+                    method.invoke(adapter, BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE)
+                    Log.i(TAG, "Set BT discoverable mode (1-arg)")
+                } catch (e2: Exception) {
+                    Log.w(TAG, "setScanMode(1-arg) also failed: ${e2.message}")
+                    // Can't make discoverable — the other glass needs to be discoverable
+                }
             }
 
             // Start BT discovery to find unpaired glasses
@@ -170,9 +186,10 @@ class BluetoothRfcommTransport(
                         val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE)
                         Log.i(TAG, "Found: $name (${device.address}) RSSI=$rssi")
 
-                        if (name.contains("ARGF20") || name.contains("RayNeo") || name.contains("X3")) {
+                        if (name.contains("ARGF20") || name.contains("RayNeo") || name.contains("X3 Pro")) {
                             if (device.bondState != BluetoothDevice.BOND_BONDED) {
-                                Log.i(TAG, "Initiating pairing with $name (${device.address})")
+                                Log.i(TAG, "*** FOUND GLASSES: $name (${device.address}) — initiating pairing ***")
+                                adapter.cancelDiscovery()
                                 device.createBond()
                             }
                         }
