@@ -15,6 +15,8 @@ import logging
 
 import RNS
 
+from pathlib import Path
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
@@ -171,6 +173,13 @@ async def index():
     return HTMLResponse(WEB_UI_HTML)
 
 
+@app.get("/iphone", response_class=HTMLResponse)
+async def iphone_pwa():
+    """Serve the iPhone PWA walkie-talkie client."""
+    pwa_path = Path(__file__).parent / "iphone-pwa.html"
+    return HTMLResponse(pwa_path.read_text(encoding="utf-8"))
+
+
 @app.get("/api/mesh-status")
 async def mesh_status():
     uptime = int(time.time() - audio_stats["start_time"])
@@ -186,7 +195,7 @@ async def mesh_status():
         },
         "ws_clients": len(ws_clients),
         "ws_clients_detail": {
-            cid: {"user": c["user"], "channel": c["channel"]}
+            cid: {"user": c["user"], "channel": c["channel"], "format": c.get("format", "opus")}
             for cid, c in ws_clients.items()
         },
         "stats": audio_stats,
@@ -207,15 +216,17 @@ async def talk_ws(ws: WebSocket):
     client_id = ws.query_params.get("id", f"client_{int(time.time()*1000)%100000}")
     channel = ws.query_params.get("channel", "alpha")
     user = ws.query_params.get("user", client_id)
+    fmt = ws.query_params.get("format", "opus")  # "opus" or "pcm16"
 
-    ws_clients[client_id] = {"ws": ws, "channel": channel, "user": user}
+    ws_clients[client_id] = {"ws": ws, "channel": channel, "user": user, "format": fmt}
 
     # Notify about the join
     join_msg = json.dumps({
         "event": "join",
         "user": user,
+        "id": client_id,
         "channel": channel,
-        "peers": len([c for c in ws_clients.values() if c["channel"] == channel]),
+        "peer_count": len([c for c in ws_clients.values() if c["channel"] == channel]),
     })
     for cid, c in list(ws_clients.items()):
         if c["channel"] == channel:
@@ -223,6 +234,18 @@ async def talk_ws(ws: WebSocket):
                 await c["ws"].send_text(join_msg)
             except Exception:
                 pass
+
+    # Send initial peer list to the newly connected client
+    peer_list = [
+        {"user": c["user"], "id": cid}
+        for cid, c in ws_clients.items()
+        if c["channel"] == channel and cid != client_id
+    ]
+    await ws.send_text(json.dumps({
+        "event": "peers",
+        "peers": peer_list,
+        "peer_count": len(peer_list)
+    }))
 
     RNS.log(f"WS client connected: {user} → channel '{channel}'")
 
@@ -264,7 +287,7 @@ async def talk_ws(ws: WebSocket):
     finally:
         ws_clients.pop(client_id, None)
         # Notify about the leave
-        leave_msg = json.dumps({"event": "leave", "user": user, "channel": channel})
+        leave_msg = json.dumps({"event": "leave", "user": user, "id": client_id, "channel": channel})
         for cid, c in list(ws_clients.items()):
             if c["channel"] == channel:
                 try:
@@ -706,6 +729,7 @@ if __name__ == "__main__":
     print(f"\n  🔊 MeshTalk Bridge starting on http://{args.host}:{args.port}")
     print(f"  📡 Transport: RETICULUM MESH (encrypted RNS.Link channels)")
     print(f"  🌐 Web UI:    http://{args.host}:{args.port}/")
+    print(f"  📱 iPhone:    http://{args.host}:{args.port}/iphone")
     print(f"  📊 Status:    http://{args.host}:{args.port}/api/mesh-status\n")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

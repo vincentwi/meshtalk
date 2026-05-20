@@ -22,13 +22,16 @@ class AudioCaptureEngine {
     private val captureDispatcher = Dispatchers.Default.limitedParallelism(1)
 
     fun start() {
+        Log.i(TAG, "start() called")
         val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        Log.i(TAG, "minBuf=$minBuf")
         audioRecord = AudioRecord(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 2
         ).also {
-            if (it.state != AudioRecord.STATE_INITIALIZED) { Log.e(TAG, "AudioRecord init failed"); return }
+            if (it.state != AudioRecord.STATE_INITIALIZED) { Log.e(TAG, "AudioRecord init failed, state=${it.state}"); return }
             it.startRecording()
+            Log.i(TAG, "AudioRecord startRecording OK")
         }
         captureJob = CoroutineScope(captureDispatcher).launch {
             val buffer = ShortArray(AEC_FRAME_SIZE)

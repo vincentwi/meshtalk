@@ -44,6 +44,7 @@ class MeshTalkService : Service() {
 
     // BLE phone client (primary mesh transport)
     var blePhoneClient: BlePhoneClient? = null
+    private var nanTransport: MeshTransport? = null
         private set
 
     // Mesh (channel manager still used for channel state, but no longer drives NAN transport)
@@ -65,6 +66,7 @@ class MeshTalkService : Service() {
     var onChannelChanged: ((String) -> Unit)? = null
     var onPeerDirectionChanged: ((Float, Float) -> Unit)? = null  // angle, distance
     var onBleStateChanged: ((String) -> Unit)? = null
+    var onRadioStateChanged: ((String) -> Unit)? = null
 
     private val binder = LocalBinder()
     inner class LocalBinder : Binder() {
@@ -107,22 +109,29 @@ class MeshTalkService : Service() {
         headTracker = HeadTracker(this)
         spatialEngine = SpatialAudioEngine()
 
-        // Create a no-op MeshTransport stub for PeerManager/ChannelManager
-        // (BLE replaces transport, but these still manage channel/peer state)
-        val stubTransport = object : MeshTransport {
-            override val peers: List<MeshPeer> get() = emptyList()
-            override var onPeerDiscovered: ((MeshPeer) -> Unit)? = null
-            override var onPeerLost: ((String) -> Unit)? = null
-            override var onDataReceived: ((String, ByteArray) -> Unit)? = null
-            override fun start(channelName: String) {}
-            override fun stop() {}
-            override fun switchChannel(channelName: String) {}
-            override fun sendToAll(data: ByteArray) {}
-            override fun sendTo(peerId: String, data: ByteArray) {}
+        // ── Transport Manager (WiFi Direct > WiFi LAN > BT RFCOMM) ──────
+        val transportManager = TransportManager(this, deviceId)
+        nanTransport = transportManager
+
+        // Wire transport data to audio pipeline
+        transportManager.onDataReceived = { peerId, data ->
+            peerManager.onPeerDataReceived(peerId)
+            handleIncomingPacket(peerId, data)
         }
-        peerManager = PeerManager(stubTransport)
+        transportManager.onPeerDiscovered = { peer ->
+            peerManager.onPeerDataReceived(peer.id)
+            Log.i(TAG, "*** PEER CONNECTED: ${peer.id} ***")
+            onRadioStateChanged?.invoke("CONNECTED")
+        }
+        transportManager.onPeerLost = { peerId ->
+            peerManager.onPeerLost(peerId)
+            audioMixer.removePeer(peerId)
+            onRadioStateChanged?.invoke("DISCOVERING")
+        }
+
+        peerManager = PeerManager(transportManager)
         peerManager.deviceId = deviceId
-        channelManager = ChannelManager(stubTransport, peerManager)
+        channelManager = ChannelManager(transportManager, peerManager)
 
         // Init native libs
         opusCodec.init()
@@ -213,10 +222,17 @@ class MeshTalkService : Service() {
         }
 
         // Start everything
+        Log.i(TAG, "Starting capture engine...")
         captureEngine.start()
+        Log.i(TAG, "Starting playback engine...")
         playbackEngine.start()
+        Log.i(TAG, "Starting head tracker...")
         headTracker.start()
+        Log.i(TAG, "Starting peer manager...")
         peerManager.start(scope)
+
+        // Start transport manager (starts all transports in parallel)
+        nanTransport?.start(ChannelManager.CHANNELS[0].serviceName)
 
         // Start BLE client — scans and connects to phone
         channelManager.joinChannel(0)
@@ -310,7 +326,50 @@ class MeshTalkService : Service() {
         }
     }
 
+    private var audioRecvCount = 0L
+
+    private fun handleIncomingPacket(peerId: String, data: ByteArray) {
+        val packet = PacketCodec.decode(data)
+        if (packet == null) {
+            if (data.isNotEmpty() && data[0] == '{'.code.toByte()) return
+            return
+        }
+        when (packet.type) {
+            PacketCodec.TYPE_AUDIO -> {
+                audioRecvCount++
+                if (audioRecvCount % 200 == 0L) {
+                    Log.i(TAG, "AUDIO RECV #$audioRecvCount from $peerId (${packet.payload.size}B opus)")
+                }
+                val decoded = opusCodec.decode(packet.payload)
+                if (decoded == null) {
+                    Log.w(TAG, "Opus decode failed for ${packet.payload.size}B payload")
+                    return
+                }
+                val spatialProcessed = spatialEngine.processSpatial(peerId, decoded)
+                val filtered = clickFilter.process(spatialProcessed)
+                audioMixer.submitFrame(peerId, filtered)
+                val mixed = audioMixer.mix(filtered.size) ?: return
+                playbackEngine.play(mixed)
+            }
+            PacketCodec.TYPE_CONTROL -> {
+                Log.d(TAG, "NAN control from $peerId: ${String(packet.payload)}")
+            }
+            PacketCodec.TYPE_PING -> {
+                val pong = PacketCodec.encodePong(packet.channelId, packet.seq)
+                // Reply via transport
+            }
+            PacketCodec.TYPE_PONG -> { /* keepalive ack */ }
+        }
+    }
+
+    private var captureFrameCount = 0L
+
     private fun processCaptureFrame(micFrame: ShortArray) {
+        captureFrameCount++
+        if (captureFrameCount % 500 == 0L) {
+            Log.d(TAG, "Capture frames: $captureFrameCount, VOX=${voxStateMachine.shouldTransmit}, muted=$isMuted")
+        }
+
         // 1. AEC
         val aecFrame = speexAec.process(micFrame)
 
@@ -323,10 +382,15 @@ class MeshTalkService : Service() {
             voxStateMachine.onVadResult(vadResult, 32) // 32ms per VAD window
         }
 
-        // 4. If speaking, encode and send via BLE to phone
-        if (voxStateMachine.shouldTransmit) {
+        // 4. If speaking (or force-transmit for walkie-talkie), encode and send
+        // For walkie-talkie: always transmit when not muted (tap to mute/unmute)
+        val shouldSend = voxStateMachine.shouldTransmit || !isMuted
+        if (shouldSend) {
             val encoded = opusCodec.encode(aecFrame, aecFrame.size) ?: return
-            // Send via BLE to phone (primary path)
+            // Send via NAN transport (glasses-to-glasses direct)
+            val packet = PacketCodec.encodeAudio(channelManager.currentChannel.id, seq++, encoded)
+            nanTransport?.sendToAll(packet)
+            // Also send via BLE to phone (secondary path)
             blePhoneClient?.sendAudio(encoded, isSpeech = true)
         }
     }

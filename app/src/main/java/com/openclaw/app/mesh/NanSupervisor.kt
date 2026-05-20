@@ -28,7 +28,7 @@ import android.util.Log
  */
 class NanSupervisor(
     private val context: Context,
-    private val transport: WifiAwareTransport
+    private val transport: MeshTransport
 ) {
 
     companion object {
@@ -135,8 +135,7 @@ class NanSupervisor(
         backoffMs = MIN_BACKOFF_MS
         consecutiveFailures = 0
 
-        // Wire supervisor into transport
-        transport.supervisor = this
+        // Supervisor wiring is done by the service (sets transport.supervisor = this)
 
         registerReceivers()
         startWatchdog()
@@ -150,7 +149,7 @@ class NanSupervisor(
         stopWatchdog()
         unregisterReceivers()
         cleanupTransport()
-        transport.supervisor = null
+        // transport.supervisor cleared by service
         transition(RadioState.DISABLED)
     }
 
